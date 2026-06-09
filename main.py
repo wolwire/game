@@ -17,7 +17,7 @@ from src.enemy import Enemy
 from src.boss import Boss
 from src.particles import ParticleSystem
 from src.world import (draw_tiles, SiteOfGrace, LoreFragment, RunePickup,
-                        WORLD_MAKERS, BOSS_TYPES, BOSS_SPAWN_OFFSETS)
+                        Decoration, WORLD_MAKERS, BOSS_TYPES, BOSS_SPAWN_OFFSETS)
 from src.ui import (draw_hud, draw_boss_bar, draw_status_text, draw_area_name,
                      draw_text_screen, draw_parry_success, draw_pickup_text)
 from data.lore import (INTRO, CONTROLS, AREA_NAMES, GRACE_MESSAGES,
@@ -91,7 +91,7 @@ class Game:
 
     def load_area(self, idx):
         maker = WORLD_MAKERS[idx]
-        self.tiles, self.walls, entities_data, graces_data, lore_data, mw, mh = maker()
+        self.tiles, self.walls, entities_data, graces_data, lore_data, decorations_data, mw, mh = maker()
         self.camera = Camera(mw, mh)
 
         spawn_x = 10 * TILE_SIZE
@@ -107,6 +107,7 @@ class Game:
 
         self.graces = graces_data
         self.lore_fragments = lore_data
+        self.decorations = decorations_data
         self.rune_pickups = []
 
         self.camera.offset.x = spawn_x - WIDTH // 2
@@ -366,6 +367,10 @@ class Game:
 
         # Tiles
         draw_tiles(self.screen, self.tiles, cam_ox, cam_oy)
+
+        # Decorations (behind entities)
+        for d in self.decorations:
+            d.draw(self.screen, cam_ox, cam_oy)
 
         # Graces
         for g in self.graces:
