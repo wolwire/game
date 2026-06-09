@@ -4,9 +4,6 @@ import math
 import random
 import os
 
-os.environ['SDL_VIDEODRIVER'] = 'dummy'
-os.environ['SDL_AUDIODRIVER'] = 'dummy'
-
 pygame.init()
 pygame.display.set_mode((1280, 720))
 
