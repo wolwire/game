@@ -29,17 +29,56 @@ def diamond(ox, oy, w=TILE_W, h=TILE_H):
 
 # =================================================================== ground
 GROUND_COLORS = {
-    'asphalt':  (47, 48, 54),
-    'road':     (40, 41, 47),
-    'sidewalk': (98, 96, 94),
-    'plaza':    (88, 84, 94),
-    'grass':    (50, 68, 42),
-    'dirt':     (78, 66, 52),
-    'water':    (24, 40, 58),
-    'sand':     (116, 104, 82),
-    'lot':      (56, 54, 53),
-    'alley':    (40, 40, 44),
+    'asphalt':  (94, 94, 100),
+    'road':     (86, 87, 94),
+    'sidewalk': (168, 162, 148),
+    'plaza':    (162, 154, 158),
+    'grass':    (84, 118, 54),
+    'dirt':     (132, 108, 76),
+    'water':    (48, 94, 140),
+    'sand':     (192, 174, 136),
+    'lot':      (114, 110, 106),
+    'alley':    (96, 94, 98),
 }
+
+# darker / lighter mottling targets per terrain (AoE-style painterly ground)
+GROUND_VAR = {
+    'grass':    ((56, 92, 42), (122, 142, 62)),
+    'asphalt':  ((80, 80, 87), (108, 108, 113)),
+    'road':     ((72, 73, 80), (100, 101, 108)),
+    'sidewalk': ((148, 142, 130), (186, 180, 164)),
+    'plaza':    ((142, 134, 140), (180, 172, 174)),
+    'dirt':     ((108, 86, 60), (156, 132, 94)),
+    'water':    ((36, 78, 122), (66, 116, 162)),
+    'sand':     ((170, 152, 116), (212, 196, 156)),
+    'lot':      ((98, 94, 92), (130, 126, 120)),
+    'alley':    ((82, 80, 86), (110, 108, 110)),
+}
+
+
+def _hashv(ix, iy, seed):
+    h = (ix * 374761393 + iy * 668265263 + seed * 1446453) & 0xffffffff
+    h = ((h ^ (h >> 13)) * 1274126177) & 0xffffffff
+    return ((h ^ (h >> 16)) & 0xffff) / 65535.0
+
+
+def vnoise(x, y, seed=0):
+    """Smooth value noise — continuous across tiles, kills the grid look."""
+    ix, iy = int(math.floor(x)), int(math.floor(y))
+    fx, fy = x - ix, y - iy
+    fx = fx * fx * (3 - 2 * fx)
+    fy = fy * fy * (3 - 2 * fy)
+    a = _hashv(ix, iy, seed)
+    b = _hashv(ix + 1, iy, seed)
+    c = _hashv(ix, iy + 1, seed)
+    d = _hashv(ix + 1, iy + 1, seed)
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy
+
+
+def _mix(c0, c1, t):
+    return (int(c0[0] + (c1[0] - c0[0]) * t),
+            int(c0[1] + (c1[1] - c0[1]) * t),
+            int(c0[2] + (c1[2] - c0[2]) * t))
 
 
 def _noise_dots(surf, rng, pts, n, lo, hi, base):
@@ -53,67 +92,64 @@ def _noise_dots(surf, rng, pts, n, lo, hi, base):
 
 
 def paint_tile(surf, ox, oy, kind, wx, wy, world=None):
-    """Paint one ground tile (diamond at ox,oy) with rich texture."""
+    """Paint one ground tile: noise-blended sub-diamonds give organic,
+    grid-free terrain in full daylight."""
     rng = _rand((wx * 73856093) ^ (wy * 19349663))
     base = GROUND_COLORS.get(kind, (60, 60, 60))
-    base = sh(base, 1 + rng.randint(-5, 5) / 100)
+    dark, light = GROUND_VAR.get(kind, (sh(base, 0.85), sh(base, 1.15)))
     pts = diamond(ox, oy)
     pygame.draw.polygon(surf, base, pts)
 
-    if kind in ('asphalt', 'road', 'lot', 'alley'):
-        _noise_dots(surf, rng, pts, 6, 0.82, 1.16, base)
+    # 2x2 sub-diamonds colored by two octaves of continuous noise
+    for a, b in ((0, 0), (0.5, 0), (0, 0.5), (0.5, 0.5)):
+        n = vnoise((wx + a) * 0.55, (wy + b) * 0.55, 7) * 0.65 \
+            + vnoise((wx + a) * 1.7, (wy + b) * 1.7, 23) * 0.35
+        col = _mix(dark, light, max(0.0, min(1.0, n)))
+        x0 = ox + 16 + (a - b) * 16 - 8
+        y0 = oy + (a + b) * 8
+        pygame.draw.polygon(surf, col, diamond(x0, y0, 16, 8))
+
+    if kind == 'grass':
+        for _ in range(7):
+            x = ox + rng.randint(6, TILE_W - 8)
+            y = oy + rng.randint(3, TILE_H - 3)
+            c = sh((96, 130, 58), rng.uniform(0.7, 1.25))
+            pygame.draw.line(surf, c, (x, y), (x + rng.randint(-1, 1), y - rng.randint(1, 3)))
+        if rng.random() < 0.05:
+            for _ in range(3):
+                surf.set_at((ox + rng.randint(8, 24), oy + rng.randint(4, 12)),
+                            rng.choice([(228, 216, 130), (216, 160, 180), (236, 236, 230)]))
+    elif kind in ('asphalt', 'road', 'lot', 'alley'):
         if rng.random() < 0.10:  # crack
             x, y = ox + rng.randint(8, 24), oy + rng.randint(4, 12)
             for _ in range(3):
                 nx, ny = x + rng.randint(-5, 5), y + rng.randint(-2, 2)
-                pygame.draw.line(surf, sh(base, 0.66), (x, y), (nx, ny))
+                pygame.draw.line(surf, sh(base, 0.7), (x, y), (nx, ny))
                 x, y = nx, ny
-        if kind in ('road', 'asphalt') and rng.random() < 0.05:  # oil stain
-            pygame.draw.ellipse(surf, sh(base, 0.78),
+        if kind in ('road', 'asphalt') and rng.random() < 0.04:  # oil stain
+            pygame.draw.ellipse(surf, sh(base, 0.8),
                                 (ox + rng.randint(6, 16), oy + rng.randint(3, 8),
                                  rng.randint(8, 14), rng.randint(4, 7)))
-        if rng.random() < 0.045:  # puddle with cold reflection
+        if rng.random() < 0.03:  # puddle mirrors the sky
             px, py = ox + rng.randint(7, 15), oy + rng.randint(3, 8)
             pw, ph = rng.randint(9, 15), rng.randint(4, 7)
-            pygame.draw.ellipse(surf, (38, 48, 66), (px, py, pw, ph))
-            pygame.draw.ellipse(surf, (70, 92, 122), (px + 2, py + 1, pw - 4, 2))
+            pygame.draw.ellipse(surf, (124, 152, 184), (px, py, pw, ph))
+            pygame.draw.ellipse(surf, (172, 196, 220), (px + 2, py + 1, pw - 4, 2))
     elif kind in ('sidewalk', 'plaza'):
-        # slab seams along the diamond axes
         if (wx + wy) % 2 == 0:
-            pygame.draw.line(surf, sh(base, 0.90), pts[0], pts[2])
+            pygame.draw.line(surf, sh(base, 0.88), pts[0], pts[2])
         else:
-            pygame.draw.line(surf, sh(base, 0.93), pts[3], pts[1])
-        _noise_dots(surf, rng, pts, 4, 0.92, 1.08, base)
-        if kind == 'plaza' and (wx % 6 == 0 and wy % 6 == 0):
-            pygame.draw.polygon(surf, sh(base, 1.07), diamond(ox + 8, oy + 4, 16, 8))
+            pygame.draw.line(surf, sh(base, 0.91), pts[3], pts[1])
         if rng.random() < 0.05:
-            pygame.draw.line(surf, sh(base, 0.66), (ox + 10, oy + 6),
+            pygame.draw.line(surf, sh(base, 0.7), (ox + 10, oy + 6),
                              (ox + 10 + rng.randint(4, 9), oy + 6 + rng.randint(-2, 3)))
-    elif kind == 'grass':
-        for _ in range(8):
-            x = ox + rng.randint(6, TILE_W - 8)
-            y = oy + rng.randint(3, TILE_H - 3)
-            c = sh((62, 88, 48), rng.uniform(0.75, 1.25))
-            pygame.draw.line(surf, c, (x, y), (x + rng.randint(-1, 1), y - rng.randint(1, 3)))
-        if rng.random() < 0.08:  # dirt patch
-            pygame.draw.ellipse(surf, sh((78, 66, 52), rng.uniform(0.9, 1.1)),
-                                (ox + rng.randint(6, 14), oy + rng.randint(3, 8), 10, 5))
-        if rng.random() < 0.06:  # tiny flowers
-            for _ in range(3):
-                surf.set_at((ox + rng.randint(8, 24), oy + rng.randint(4, 12)),
-                            rng.choice([(200, 190, 120), (190, 140, 160)]))
     elif kind == 'water':
-        for i in range(2):
-            y = oy + 4 + i * 6 + rng.randint(-1, 1)
+        if rng.random() < 0.5:
+            y = oy + rng.randint(4, 11)
             x = ox + rng.randint(6, 12)
-            pygame.draw.line(surf, sh(base, 1.45), (x, y), (x + rng.randint(6, 12), y))
-        if rng.random() < 0.2:
-            pygame.draw.line(surf, (60, 90, 116), (ox + 8, oy + 10), (ox + 20, oy + 10))
+            pygame.draw.line(surf, (150, 190, 220), (x, y), (x + rng.randint(5, 11), y))
     elif kind in ('dirt', 'sand'):
-        _noise_dots(surf, rng, pts, 7, 0.85, 1.15, base)
-        if rng.random() < 0.1:
-            pygame.draw.ellipse(surf, sh(base, 0.8),
-                                (ox + rng.randint(8, 16), oy + rng.randint(4, 8), 6, 3))
+        _noise_dots(surf, rng, pts, 6, 0.85, 1.15, base)
 
     # neighbor-aware edges: curbs & shorelines
     if world is not None:
@@ -122,9 +158,11 @@ def paint_tile(surf, ox, oy, kind, wx, wy, world=None):
                 return world.ground[y][x]
             return kind
         if kind == 'sidewalk':
-            curb = sh(base, 1.35)
+            curb = sh(base, 1.22)
+            curb_d = sh(base, 0.72)
             if g(wx + 1, wy) in ('road', 'asphalt'):   # SE edge
                 pygame.draw.line(surf, curb, pts[0], pts[1], 2)
+                pygame.draw.line(surf, curb_d, (pts[0][0] + 1, pts[0][1] + 2), (pts[1][0] - 1, pts[1][1] + 2), 1)
             if g(wx, wy + 1) in ('road', 'asphalt'):   # SW edge
                 pygame.draw.line(surf, curb, pts[1], pts[2], 2)
             if g(wx - 1, wy) in ('road', 'asphalt'):
@@ -132,35 +170,35 @@ def paint_tile(surf, ox, oy, kind, wx, wy, world=None):
             if g(wx, wy - 1) in ('road', 'asphalt'):
                 pygame.draw.line(surf, curb, pts[3], pts[0], 2)
         elif kind == 'water':
-            foam = (96, 122, 142)
+            foam = (196, 216, 230)
             if g(wx - 1, wy) not in ('water',):
                 pygame.draw.line(surf, foam, pts[2], pts[3], 1)
             if g(wx, wy - 1) not in ('water',):
                 pygame.draw.line(surf, foam, pts[3], pts[0], 1)
         elif kind == 'grass' and g(wx + 1, wy) in ('sidewalk', 'plaza', 'asphalt', 'road'):
-            pygame.draw.line(surf, sh(base, 0.7), pts[0], pts[1], 1)
+            pygame.draw.line(surf, sh(base, 0.75), pts[0], pts[1], 1)
 
 
 def paint_decal(surf, ox, oy, kind, wx, wy):
     rng = _rand((wx * 31 + wy * 57) & 0xffffff)
     cx, cy = ox + HALF_W, oy + HALF_H
     if kind == 'dash_x':
-        pygame.draw.line(surf, (176, 172, 142), (cx - 7, cy - 3), (cx + 7, cy + 3), 2)
+        pygame.draw.line(surf, (224, 218, 178), (cx - 7, cy - 3), (cx + 7, cy + 3), 2)
     elif kind == 'dash_y':
-        pygame.draw.line(surf, (176, 172, 142), (cx + 7, cy - 3), (cx - 7, cy + 3), 2)
+        pygame.draw.line(surf, (224, 218, 178), (cx + 7, cy - 3), (cx - 7, cy + 3), 2)
     elif kind == 'cross_x':   # crosswalk stripes for a road running along x
-        pygame.draw.line(surf, (168, 166, 150), (cx - 8, cy - 4), (cx - 1, cy - 1), 3)
-        pygame.draw.line(surf, (168, 166, 150), (cx + 1, cy + 1), (cx + 8, cy + 4), 3)
+        pygame.draw.line(surf, (226, 224, 212), (cx - 8, cy - 4), (cx - 1, cy - 1), 3)
+        pygame.draw.line(surf, (226, 224, 212), (cx + 1, cy + 1), (cx + 8, cy + 4), 3)
     elif kind == 'cross_y':
-        pygame.draw.line(surf, (168, 166, 150), (cx + 8, cy - 4), (cx + 1, cy - 1), 3)
-        pygame.draw.line(surf, (168, 166, 150), (cx - 1, cy + 1), (cx - 8, cy + 4), 3)
+        pygame.draw.line(surf, (226, 224, 212), (cx + 8, cy - 4), (cx + 1, cy - 1), 3)
+        pygame.draw.line(surf, (226, 224, 212), (cx - 1, cy + 1), (cx - 8, cy + 4), 3)
     elif kind == 'manhole':
-        pygame.draw.ellipse(surf, (30, 30, 33), (cx - 6, cy - 3, 12, 6))
-        pygame.draw.ellipse(surf, (66, 66, 70), (cx - 6, cy - 3, 12, 6), 1)
+        pygame.draw.ellipse(surf, (64, 64, 68), (cx - 6, cy - 3, 12, 6))
+        pygame.draw.ellipse(surf, (110, 110, 114), (cx - 6, cy - 3, 12, 6), 1)
         pygame.draw.line(surf, (66, 66, 70), (cx - 3, cy), (cx + 3, cy), 1)
     elif kind == 'grime':
         for _ in range(5):
-            surf.set_at((cx + rng.randint(-8, 8), cy + rng.randint(-4, 4)), (30, 30, 32))
+            surf.set_at((cx + rng.randint(-8, 8), cy + rng.randint(-4, 4)), (70, 70, 74))
     elif kind == 'leaf':
         for _ in range(4):
             surf.set_at((cx + rng.randint(-9, 9), cy + rng.randint(-4, 4)),
@@ -183,21 +221,28 @@ def render_chunk(world, ccx, ccy):
             kind = world.ground[wy][wx]
             paint_tile(surf, ox, oy, kind, wx, wy, world)
             dec = world.decals.get((wx, wy))
+            # decals only belong on pavement — districts repaint terrain
+            # over old roads, so stale markings must not bleed through
             if dec:
-                paint_decal(surf, ox, oy, dec, wx, wy)
+                if dec in ('dash_x', 'dash_y', 'cross_x', 'cross_y', 'manhole'):
+                    ok = kind in ('road', 'asphalt')
+                else:
+                    ok = kind in ('road', 'asphalt', 'sidewalk', 'plaza', 'lot', 'alley')
+                if ok:
+                    paint_decal(surf, ox, oy, dec, wx, wy)
     # anchor: tile (x0,y0) top corner sits at local ((CHUNK-1)*HALF_W + HALF_W, 0)
     return surf, (CHUNK * HALF_W, 0)
 
 
 # ================================================================ buildings
 BUILDING_STYLES = {
-    'brick':      {'wall': (104, 66, 56),  'win': (24, 26, 34), 'lit': (224, 176, 96),  'trim': (78, 50, 44)},
-    'concrete':   {'wall': (116, 116, 122), 'win': (24, 28, 36), 'lit': (170, 205, 235), 'trim': (90, 90, 96)},
-    'glass':      {'wall': (58, 72, 90),   'win': (44, 62, 82), 'lit': (130, 195, 240), 'trim': (40, 52, 66)},
-    'shop':       {'wall': (96, 88, 102),  'win': (28, 30, 40), 'lit': (240, 168, 96),  'trim': (70, 64, 76)},
-    'industrial': {'wall': (98, 90, 74),   'win': (22, 24, 28), 'lit': (210, 130, 76),  'trim': (72, 66, 56)},
-    'house':      {'wall': (118, 96, 78),  'win': (26, 28, 36), 'lit': (228, 184, 108), 'trim': (86, 70, 58)},
-    'tower':      {'wall': (38, 46, 62),   'win': (54, 74, 100), 'lit': (134, 224, 255), 'trim': (28, 34, 46)},
+    'brick':      {'wall': (164, 102, 82),  'win': (104, 128, 156), 'lit': (146, 174, 198), 'trim': (120, 76, 62)},
+    'concrete':   {'wall': (178, 176, 178), 'win': (108, 132, 160), 'lit': (150, 178, 202), 'trim': (140, 138, 142)},
+    'glass':      {'wall': (118, 140, 162), 'win': (130, 162, 192), 'lit': (170, 200, 224), 'trim': (90, 108, 128)},
+    'shop':       {'wall': (172, 150, 158), 'win': (104, 128, 156), 'lit': (150, 176, 200), 'trim': (130, 110, 120)},
+    'industrial': {'wall': (160, 144, 116), 'win': (96, 116, 138), 'lit': (140, 162, 184), 'trim': (118, 106, 86)},
+    'house':      {'wall': (186, 152, 118), 'win': (106, 130, 158), 'lit': (152, 178, 202), 'trim': (140, 112, 88)},
+    'tower':      {'wall': (108, 126, 152), 'win': (140, 172, 204), 'lit': (184, 212, 234), 'trim': (84, 98, 120)},
 }
 STORY_PX = 30
 
@@ -223,7 +268,7 @@ def building(seed, fw, fh, stories, style):
     Nt, Et, St, Wt = [(p[0], p[1] - zh) for p in (N, E, S, W)]
 
     wall = sh(st['wall'], rng.uniform(0.92, 1.06))
-    left_c, right_c, top_c = sh(wall, 0.62), sh(wall, 0.86), sh(wall, 1.1)
+    left_c, right_c, top_c = sh(wall, 0.72), sh(wall, 0.96), sh(wall, 1.22)
 
     pygame.draw.polygon(surf, left_c, [Wt, St, S, W])
     pygame.draw.polygon(surf, right_c, [St, Et, E, S])
@@ -250,10 +295,10 @@ def building(seed, fw, fh, stories, style):
                 wy1 = yb1 + s * STORY_PX + 8
                 hgt = 13
                 r = rng.random()
-                if r < 0.12:
-                    wcol = st['lit']
-                elif r < 0.18:
-                    wcol = sh(st['lit'], 0.55)
+                if r < 0.18:
+                    wcol = sh(st['lit'], fshade * 1.05)     # bright sky glint
+                elif r < 0.24:
+                    wcol = (52, 56, 66)                     # broken / dark interior
                 else:
                     wcol = sh(st['win'], fshade)
                 quad = [(x0, wy0), (x1, wy1), (x1, wy1 + hgt), (x0, wy0 + hgt)]
@@ -262,19 +307,17 @@ def building(seed, fw, fh, stories, style):
                 pygame.draw.polygon(surf, sh(wall, fshade * 0.7), quad, 1)
                 pygame.draw.line(surf, sh(wall, fshade * 1.18),
                                  (x0, wy0 + hgt + 1), (x1, wy1 + hgt + 1), 1)
-                if r < 0.12:  # glow spill
-                    pygame.draw.polygon(surf, sh(wcol, 0.5),
-                                        [(x0, wy0 + hgt), (x1, wy1 + hgt),
-                                         (x1, wy1 + hgt + 3), (x0, wy0 + hgt + 3)])
-                if rng.random() < 0.07:  # broken window
-                    pygame.draw.line(surf, (12, 12, 16), (x0 + 1, wy0 + 2), (x1 - 1, wy1 + hgt - 3), 2)
+                if r < 0.18:  # diagonal sky glint across the pane
+                    pygame.draw.line(surf, sh(wcol, 1.25), (x0 + 1, wy0 + hgt - 3), (x1 - 1, wy1 + 2), 1)
+                if rng.random() < 0.06:  # cracked pane
+                    pygame.draw.line(surf, (236, 240, 244), (x0 + 1, wy0 + 2), (x1 - 1, wy1 + hgt - 3), 1)
         # dirt streaks
         for _ in range(fw + fh):
             t = rng.random()
             x = p0[0] + axx * t
             y0_ = p0[1] + axy * t + rng.randint(0, zh // 2)
             streak = pygame.Surface((2, rng.randint(10, max(11, zh // 2))), pygame.SRCALPHA)
-            streak.fill((10, 10, 12, 38))
+            streak.fill((40, 38, 36, 30))
             surf.blit(streak, (x, y0_))
 
     face(Wt, St, max(1, fw), 0.62, 0)
@@ -314,16 +357,17 @@ def building(seed, fw, fh, stories, style):
         # neon sign above awning
         if style == 'shop':
             neon = rng.choice(NEON_COLORS)
-            sx0 = gx0 + 4
-            sy0 = gy0 - 26
+            sx0 = gx0 + 3
+            sy0 = gy0 - 27
             nchars = rng.choice(NEON_WORDS)
+            bw = nchars * 7 + 6
+            board = [(sx0, sy0), (sx0 + bw, sy0 + bw * 0.5), (sx0 + bw, sy0 + bw * 0.5 + 10), (sx0, sy0 + 10)]
+            pygame.draw.polygon(surf, sh(neon, 0.55), board)
+            pygame.draw.polygon(surf, sh(neon, 0.35), board, 1)
             for i in range(nchars):
-                ch_x = sx0 + i * 7
-                ch_y = sy0 + (gy1 - gy0) / max(1, (gx1 - gx0)) * (i * 7) * 0 + i * 3
-                pygame.draw.rect(surf, neon, (ch_x, ch_y, 4, 7), 1)
-            glow = pygame.Surface((nchars * 7 + 14, 22), pygame.SRCALPHA)
-            pygame.draw.ellipse(glow, (*neon, 36), glow.get_rect())
-            surf.blit(glow, (sx0 - 7, sy0 - 6))
+                ch_x = sx0 + 4 + i * 7
+                ch_y = sy0 + 2 + (4 + i * 7) * 0.5
+                pygame.draw.rect(surf, sh(neon, 1.4), (ch_x, ch_y, 4, 6), 1)
 
     # fire escape on some brick/concrete buildings (SE face)
     if style in ('brick', 'concrete') and stories >= 3 and rng.random() < 0.6:

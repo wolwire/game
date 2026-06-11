@@ -42,8 +42,8 @@ class Game:
         self.camera = Camera(self.player.x, self.player.y)
         self.particles = Particles()
         self.lighting = Lighting()
-        self.vignette = assets.vignette()
         self.chunks = {}
+        self._shadow_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         ui.build_minimap(self.world)
 
         self.enemies = []
@@ -486,17 +486,12 @@ class Game:
         s = self.screen
         if self.state == 'title':
             ui.draw_title(s, self.t)
-            self.particles.update(0)
-            self.particles.draw_rain(s)
             pygame.display.flip()
             return
         s.fill(C_BG)
         ox, oy = self.camera.offset()
         self.draw_world(s, ox, oy)
         self.particles.draw_world(s, ox, oy)
-        self.lighting.apply(s)
-        self.particles.draw_rain(s)
-        s.blit(self.vignette, (0, 0))
 
         p = self.player
         if self.state in ('playing', 'dialogue', 'boss_intro', 'beacon', 'dead'):
@@ -584,6 +579,7 @@ class Game:
                 s.blit(surf, (sx + ox - ax, sy + oy - ay))
 
         self.particles.draw_decals(s, ox, oy)
+        self.draw_shadows(s, ox, oy)
 
         # telegraphs
         if self.active_boss:
@@ -605,7 +601,6 @@ class Game:
         p = self.player
         px, py = p.x, p.y
         view = 46
-        lt = self.lighting
 
         def add_sprite(img_anchor, wx, wy, z=0.0, bias=0.0):
             img, (ax, ay) = img_anchor
@@ -626,24 +621,19 @@ class Game:
         for bx, by, name in w.beacons:
             if abs(bx - px) < view and abs(by - py) < view:
                 add_sprite(assets.prop('beacon'), bx, by)
-                lt.add_world(ox, oy, bx, by, 40, 240, (44, 96, 120))
         for (x, y, idx) in w.lore:
             if idx not in self.lore_found and abs(x - px) < view and abs(y - py) < view:
                 add_sprite(assets.prop('lore'), x, y)
-                lt.add_world(ox, oy, x, y, 8, 50, (60, 50, 24))
         for item in w.weapons:
             x, y, wkey = item
             if abs(x - px) < view and abs(y - py) < view:
                 add_sprite(assets.prop('weapon_pickup'), x, y)
-                lt.add_world(ox, oy, x, y, 8, 60, (30, 55, 70))
         for item in w.caches:
             x, y = item[0], item[1]
             if abs(x - px) < view and abs(y - py) < view:
                 add_sprite(assets.prop('cache'), x, y)
-                lt.add_world(ox, oy, x, y, 8, 55, (60, 44, 20))
         if self.echo and abs(self.echo[0] - px) < view and abs(self.echo[1] - py) < view:
             add_sprite(assets.prop('shard_echo'), self.echo[0], self.echo[1])
-            lt.add_world(ox, oy, self.echo[0], self.echo[1], 10, 70, (40, 60, 80))
 
         for (x, y, key, style) in w.npcs:
             if abs(x - px) < view and abs(y - py) < view:
@@ -658,8 +648,6 @@ class Game:
             drawables.append((p.x + p.y, 'player', p))
         for pr in self.projectiles:
             drawables.append((pr.x + pr.y, 'proj', pr))
-            lt.add_world(ox, oy, pr.x, pr.y, 22, 46,
-                         (pr.color[0] // 5, pr.color[1] // 5, pr.color[2] // 5))
 
         drawables.sort(key=lambda d: d[0])
         for depth, kind, payload in drawables:
@@ -682,6 +670,8 @@ class Game:
                     puppet.draw(s, ox, oy, e.x, e.y, e.fx, e.fy, e.style, e.anim(),
                                 e.anim_t, WEAPONS[wkey] if wkey else None,
                                 e.attack_info(), flash=e.hit_flash * 3)
+                if e.hp < e.max_hp:
+                    self.draw_healthbar(s, ox, oy, e.x, e.y, 58, e.hp / e.max_hp)
             elif kind == 'boss':
                 b = payload
                 if b.kind == 'hound':
@@ -692,9 +682,6 @@ class Game:
                     puppet.draw(s, ox, oy, b.x, b.y, b.fx, b.fy, b.style, b.anim(),
                                 b.anim_t, WEAPONS[wkey] if wkey else None,
                                 b.attack_info(), flash=b.hit_flash * 3)
-                if b.kind in ('chorister', 'archivist'):
-                    col = (40, 26, 56) if b.kind == 'chorister' else (24, 46, 60)
-                    lt.add_world(ox, oy, b.x, b.y, 30, 120, col)
             elif kind == 'player':
                 self.draw_player(s, ox, oy)
             elif kind == 'proj':
@@ -731,16 +718,57 @@ class Game:
                                      (pts[3][0], pts[3][1] - hgt), (pts[1][0], pts[1][1] - hgt), 2)
                     s.blit(fog, (sx, sy - hgt))
 
-        # ---- lights ----
-        for (lx, ly, lz, lrad, lcol) in w.lights:
-            lt.add_world(ox, oy, lx, ly, lz, lrad, lcol)
-        # the player carries a faint cold light so they always read
-        lt.add_world(ox, oy, p.x, p.y, 20, 190, (48, 54, 68))
-        if p.state == 'attack' and p.trail:
-            tx, ty, _ = p.trail[-1]
-            lt.add(tx, ty, 60, tuple(c // 5 for c in p.weapon['trail']))
-        # lit building windows pool a little light at street level — skipped
-        # for performance; shop neon + lampposts come from world.lights.
+
+    SHADOW_DX, SHADOW_DY = -0.55, 0.22   # sun from the north-east
+
+    def draw_shadows(self, s, ox, oy):
+        """Cast shadows for buildings and tall props toward the south-west,
+        AoE-style. Drawn on one surface so overlaps don't double-darken."""
+        w = self.world
+        p = self.player
+        view = 46
+        temp = self._shadow_surf
+        temp.fill((0, 0, 0, 0))
+        col = (28, 34, 26, 84)
+        for b in w.buildings:
+            if not (abs(b.x - p.x) < view + b.fw and abs(b.y - p.y) < view + b.fh):
+                continue
+            zh = b.stories * 30
+            dx, dy = self.SHADOW_DX * zh, self.SHADOW_DY * zh
+            from src.iso import world_to_screen as w2s
+            W_ = w2s(b.x, b.y + b.fh)
+            S_ = w2s(b.x + b.fw, b.y + b.fh)
+            E_ = w2s(b.x + b.fw, b.y)
+            pts = [(W_[0] + ox, W_[1] + oy), (S_[0] + ox, S_[1] + oy), (E_[0] + ox, E_[1] + oy),
+                   (E_[0] + ox + dx, E_[1] + oy + dy), (S_[0] + ox + dx, S_[1] + oy + dy),
+                   (W_[0] + ox + dx, W_[1] + oy + dy)]
+            pygame.draw.polygon(temp, col, pts)
+        from src.iso import world_to_screen as w2s
+        for pr in w.props:
+            if pr.kind not in ('tree', 'dead_tree', 'lamppost', 'traffic_light', 'beacon'):
+                continue
+            if not (abs(pr.x - p.x) < view and abs(pr.y - p.y) < view):
+                continue
+            h = {'tree': 56, 'dead_tree': 38, 'lamppost': 60, 'traffic_light': 56, 'beacon': 80}[pr.kind]
+            sx, sy = w2s(pr.x, pr.y)
+            sx += ox
+            sy += oy
+            if pr.kind in ('tree', 'dead_tree'):
+                r = h // 3
+                pygame.draw.ellipse(temp, col, (sx + self.SHADOW_DX * h - r, sy + self.SHADOW_DY * h - r * 0.4,
+                                                r * 2, r * 0.9))
+                pygame.draw.line(temp, col, (sx, sy), (sx + self.SHADOW_DX * h * 0.7, sy + self.SHADOW_DY * h * 0.7), 3)
+            else:
+                pygame.draw.line(temp, col, (sx, sy),
+                                 (sx + self.SHADOW_DX * h, sy + self.SHADOW_DY * h), 3)
+        s.blit(temp, (0, 0))
+
+    def draw_healthbar(self, s, ox, oy, x, y, z, frac):
+        sx, sy = world_to_screen(x, y, z)
+        sx += ox
+        sy += oy
+        pygame.draw.rect(s, (30, 30, 30), (sx - 12, sy, 24, 4))
+        pygame.draw.rect(s, (70, 200, 60), (sx - 11, sy + 1, int(22 * max(0, frac)), 2))
 
     def draw_player(self, s, ox, oy):
         p = self.player

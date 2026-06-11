@@ -66,10 +66,12 @@ python3 main.py
 
 A 240×240 fine-tile open city (the player spans tiles — scenery is built from
 small tiles, not player-sized blocks), fully explorable from the first step
-and drawn entirely in code: pre-rendered ground chunks with curbs, crosswalks,
-puddles and grime; buildings with lit windows, storefront awnings, neon signs,
-fire escapes and rooftop furniture; wrecked cars; a real-time lightmap with
-sodium lampposts, neon spill and signal-blue beacons under looping rain.
+and drawn entirely in code in a bright, classic-RTS daylight style: painterly
+noise-blended terrain with no visible tile grid, curbs, crosswalks and sky
+puddles; sun-lit buildings with sky-reflecting windows, awnings, sign boards,
+fire escapes and rooftop furniture that cast long south-west shadows; wrecked
+cars, cargo containers and street furniture; AoE-style health bars over
+wounded enemies.
 Districts: Maintenance Hub 7, Sleepwalker Boulevard, the Night Market of the
 Last Second, Echo Park, The Long Saturday, the Graveyard of Cranes, The
 Unfinished Mile, Cathedral Plaza, and the Helix Tower.
