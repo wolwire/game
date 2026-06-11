@@ -6,10 +6,10 @@ from src.entity import move_with_collision, dist, norm, Projectile
 
 BOSS_STATS = {
     #            hp   speed contact_dmg shards style
-    'warden':    (640, 4.2, 30, 900, 'warden'),
-    'chorister': (520, 2.8, 22, 850, 'chorister'),
-    'hound':     (400, 9.2, 18, 600, 'feral'),
-    'archivist': (860, 4.4, 26, 0, 'archivist'),
+    'warden':    (640, 2.1, 30, 900, 'warden'),
+    'chorister': (520, 1.4, 22, 850, 'chorister'),
+    'hound':     (400, 4.6, 18, 600, 'hound'),
+    'archivist': (860, 2.2, 26, 0, 'archivist'),
 }
 
 
@@ -29,7 +29,7 @@ class Boss:
         self.x, self.y = x, y
         self.cx, self.cy = arena_center
         self.arena_r = arena_r
-        self.radius = 1.0 if kind != 'hound' else 0.7
+        self.radius = 0.55 if kind != 'hound' else 0.45
         self.fx, self.fy = 0.0, 1.0
         self.alive = True
         self.active = False
@@ -44,6 +44,7 @@ class Boss:
         self.telegraphs = []
         self.charge_dir = (0.0, 0.0)
         self.weapon_key = 'sledge' if kind == 'warden' else None
+        self.death_clock = None
 
     # ------------------------------------------------------------------
     def update(self, dt, world, player, projectiles, particles, enemies):
@@ -65,7 +66,7 @@ class Boss:
             if tg.t <= 0:
                 self.telegraphs.remove(tg)
                 particles.slam(tg.x, tg.y, tg.r)
-                if dist(player.x, player.y, tg.x, tg.y) < tg.r + 0.4:
+                if dist(player.x, player.y, tg.x, tg.y) < tg.r + 0.2:
                     if player.take_damage(tg.dmg, player.x - tg.x, player.y - tg.y) == 'hit':
                         particles.blood(player.x, player.y)
 
@@ -107,9 +108,9 @@ class Boss:
             self.state = 'chase'
         elif self.state == 'chase':
             d = dist(self.x, self.y, player.x, player.y)
-            if d > 3.2:
+            if d > 1.7:
                 self._step(dt, world, player.x, player.y, sp)
-                if d > 10 and random.random() < (0.012 if not self.phase2 else 0.02):
+                if d > 5 and random.random() < (0.012 if not self.phase2 else 0.02):
                     self._begin('charge_wind', 0.55)
                     self.fx, self.fy = norm(player.x - self.x, player.y - self.y)
             else:
@@ -118,13 +119,13 @@ class Boss:
                     self.combo = 0
                 else:
                     self._begin('slam_wind', 0.8)
-                    r = 5.2 if not self.phase2 else 6.4
+                    r = 2.6 if not self.phase2 else 3.2
                     self.telegraphs.append(Telegraph(player.x, player.y, r, 1.0, 34))
         elif self.state == 'windup':
             self.timer -= dt
             self.fx, self.fy = norm(player.x - self.x, player.y - self.y)
             if self.timer <= 0:
-                if self._melee(player, particles, self.dmg, 3.8):
+                if self._melee(player, particles, self.dmg, 2.0):
                     return
                 self.combo += 1
                 if self.combo < (3 if self.phase2 else 2):
@@ -139,10 +140,10 @@ class Boss:
         elif self.state == 'charge':
             self.timer -= dt
             self.x, self.y = move_with_collision(world, self.x, self.y,
-                                                 self.charge_dir[0] * 18 * dt,
-                                                 self.charge_dir[1] * 18 * dt, self.radius)
-            if dist(self.x, self.y, player.x, player.y) < 2.2:
-                self._melee(player, particles, self.dmg + 8, 2.6)
+                                                 self.charge_dir[0] * 9 * dt,
+                                                 self.charge_dir[1] * 9 * dt, self.radius)
+            if dist(self.x, self.y, player.x, player.y) < 1.2:
+                self._melee(player, particles, self.dmg + 8, 1.4)
                 self.timer = 0
             if self.timer <= 0:
                 self._begin('recover', 0.9)
@@ -154,7 +155,7 @@ class Boss:
                     for i in range(8):
                         a = i * math.pi / 4
                         projectiles.append(Projectile(self.x, self.y,
-                                                      math.cos(a) * 9, math.sin(a) * 9,
+                                                      math.cos(a) * 4.5, math.sin(a) * 4.5,
                                                       16, (255, 170, 60), ttl=1.4))
         elif self.state in ('recover', 'stagger'):
             self.timer -= dt
@@ -167,18 +168,18 @@ class Boss:
         if self.state == 'idle':
             self.state = 'chase'
         elif self.state == 'chase':
-            if d < 6.0:
+            if d < 3.0:
                 self._step(dt, world, 2 * self.x - player.x, 2 * self.y - player.y, self.speed)
-            elif d > 12.0:
+            elif d > 6.0:
                 self._step(dt, world, player.x, player.y, self.speed)
             else:
                 self.fx, self.fy = norm(player.x - self.x, player.y - self.y)
             self.timer -= dt
             if self.timer <= 0:
                 r = random.random()
-                if d < 6.4:
+                if d < 3.2:
                     self._begin('scream_wind', 0.7)
-                    self.telegraphs.append(Telegraph(self.x, self.y, 6.8, 0.7, 30))
+                    self.telegraphs.append(Telegraph(self.x, self.y, 3.4, 0.7, 30))
                 elif r < 0.55:
                     self._begin('burst', 0.5)
                     self.combo = 3 if not self.phase2 else 5
@@ -193,7 +194,7 @@ class Boss:
                 for i in range(n):
                     a = off + i * 2 * math.pi / n
                     projectiles.append(Projectile(self.x, self.y,
-                                                  math.cos(a) * 7.2, math.sin(a) * 7.2,
+                                                  math.cos(a) * 3.6, math.sin(a) * 3.6,
                                                   15, (200, 130, 255), ttl=2.6))
                 particles.note(self.x, self.y)
                 self.timer = 0.55
@@ -211,7 +212,7 @@ class Boss:
                 if living < 3:
                     for _ in range(2):
                         a = random.random() * 2 * math.pi
-                        e = Enemy('husk', self.cx + math.cos(a) * 8, self.cy + math.sin(a) * 8)
+                        e = Enemy('husk', self.cx + math.cos(a) * 4, self.cy + math.sin(a) * 4)
                         e.aggro = True
                         e.summoned = True
                         enemies.append(e)
@@ -231,8 +232,8 @@ class Boss:
             self._begin('circle', random.uniform(0.8, 1.6))
         elif self.state == 'circle':
             ang = math.atan2(self.y - player.y, self.x - player.x) + 1.5 * dt
-            tx = player.x + math.cos(ang) * 6.4
-            ty = player.y + math.sin(ang) * 6.4
+            tx = player.x + math.cos(ang) * 3.2
+            ty = player.y + math.sin(ang) * 3.2
             self._step(dt, world, tx, ty, sp * 0.8)
             self.fx, self.fy = norm(player.x - self.x, player.y - self.y)
             self.timer -= dt
@@ -248,10 +249,10 @@ class Boss:
         elif self.state == 'lunge':
             self.timer -= dt
             self.x, self.y = move_with_collision(world, self.x, self.y,
-                                                 self.charge_dir[0] * 20 * dt,
-                                                 self.charge_dir[1] * 20 * dt, self.radius)
-            if dist(self.x, self.y, player.x, player.y) < 1.8:
-                self._melee(player, particles, self.dmg, 2.2)
+                                                 self.charge_dir[0] * 10 * dt,
+                                                 self.charge_dir[1] * 10 * dt, self.radius)
+            if dist(self.x, self.y, player.x, player.y) < 1.0:
+                self._melee(player, particles, self.dmg, 1.2)
                 self.timer = 0
             if self.timer <= 0:
                 self.combo -= 1
@@ -270,14 +271,14 @@ class Boss:
         if self.state == 'idle':
             self.state = 'chase'
         elif self.state == 'chase':
-            if d > 4.0:
+            if d > 2.0:
                 self._step(dt, world, player.x, player.y, self.speed)
             else:
                 self.fx, self.fy = norm(player.x - self.x, player.y - self.y)
             self.timer -= dt
             if self.timer <= 0:
                 r = random.random()
-                if d < 4.8:
+                if d < 2.4:
                     self._begin('windup', 0.4)
                     self.combo = 0
                 elif r < 0.3:
@@ -289,15 +290,15 @@ class Boss:
                     n = 4 if self.phase2 else 3
                     for i in range(n):
                         self.telegraphs.append(Telegraph(
-                            player.x + random.uniform(-3, 3) * i,
-                            player.y + random.uniform(-3, 3) * i,
-                            3.4, 0.9 + i * 0.35, 26))
+                            player.x + random.uniform(-1.5, 1.5) * i,
+                            player.y + random.uniform(-1.5, 1.5) * i,
+                            1.7, 0.9 + i * 0.35, 26))
                     self._begin('recover', 1.2)
         elif self.state == 'windup':
             self.timer -= dt
             self.fx, self.fy = norm(player.x - self.x, player.y - self.y)
             if self.timer <= 0:
-                if self._melee(player, particles, self.dmg, 4.0):
+                if self._melee(player, particles, self.dmg, 2.0):
                     return
                 self.combo += 1
                 if self.combo < 2:
@@ -309,7 +310,7 @@ class Boss:
             if self.timer <= 0:
                 particles.static_burst(self.x, self.y)
                 a = random.random() * 2 * math.pi
-                r = random.uniform(4.0, 6.8)
+                r = random.uniform(2.0, 3.4)
                 self.x = max(self.cx - self.arena_r, min(self.cx + self.arena_r, player.x + math.cos(a) * r))
                 self.y = max(self.cy - self.arena_r, min(self.cy + self.arena_r, player.y + math.sin(a) * r))
                 particles.static_burst(self.x, self.y)
@@ -324,7 +325,7 @@ class Boss:
                 for i in range(spread):
                     a = base + (i - spread // 2) * 0.22
                     projectiles.append(Projectile(self.x, self.y,
-                                                  math.cos(a) * 10, math.sin(a) * 10,
+                                                  math.cos(a) * 5.0, math.sin(a) * 5.0,
                                                   17, (120, 220, 255), ttl=2.2))
                 self.timer = 0.5
                 if self.combo == 0:
@@ -336,7 +337,7 @@ class Boss:
                     from src.enemy import Enemy
                     living = sum(1 for e in enemies if e.alive and getattr(e, 'summoned', False))
                     if living < 2:
-                        e = Enemy('drone', self.x + 2, self.y + 2)
+                        e = Enemy('drone', self.x + 1, self.y + 1)
                         e.aggro = True
                         e.summoned = True
                         enemies.append(e)
@@ -356,33 +357,25 @@ class Boss:
         if self.hp <= 0:
             self.hp = 0
             self.alive = False
+            self.death_clock = 0.0
             particles.death_burst(self.x, self.y, big=True)
             particles.blood_decal(self.x, self.y)
             return self.shards
         return 0
 
-    # ---- presentation ----
-    def anim(self):
-        if self.state in ('windup', 'slam_wind', 'lunge_wind', 'charge_wind', 'scream_wind', 'burst', 'fan', 'summon'):
-            return 'windup'
+    # ---- presentation: (anim_name, t_or_progress, mode) ----
+    def anim_state(self):
+        if not self.alive:
+            return ('die', self.death_clock or 0.0, 'time')
+        prog = min(1.0, self.atk_t / max(0.01, self.atk_total))
+        if self.state in ('windup', 'slam_wind', 'lunge_wind', 'charge_wind'):
+            return ('swing', 0.45 * prog, 'once')
         if self.state in ('charge', 'lunge'):
-            return 'attack'
+            return ('swing', 0.5 + 0.35 * prog, 'once')
+        if self.state in ('burst', 'fan', 'summon', 'scream_wind', 'teleport'):
+            return ('cast', prog, 'once')
         if self.state == 'stagger':
-            return 'stagger'
+            return ('hit', min(1.0, prog * 2), 'once')
         if self.state in ('chase', 'circle'):
-            return 'run' if self.kind == 'hound' else 'walk'
-        return 'idle'
-
-    def attack_info(self):
-        kind = 'smash' if self.kind == 'warden' else 'swing'
-        if self.state in ('windup', 'slam_wind'):
-            p = 0.36 * min(1.0, self.atk_t / max(0.01, self.atk_total))
-            return (kind, p, self.combo)
-        if self.state in ('charge', 'lunge'):
-            return (kind, 0.5, self.combo)
-        if self.state == 'recover':
-            p = 0.62 + 0.38 * min(1.0, self.atk_t / max(0.01, self.atk_total))
-            return (kind, p, self.combo)
-        if self.state in ('burst', 'fan', 'scream_wind', 'summon'):
-            return ('swing', 0.25, 0)   # arms-raised casting stance
-        return None
+            return ('run', self.anim_t, 'time')
+        return ('stance', self.anim_t, 'time')

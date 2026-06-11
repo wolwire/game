@@ -26,9 +26,9 @@ def shot(g, name):
 
 
 g = game_main.Game()
-print('world generated:', len(g.world.buildings), 'buildings,',
-      len(g.world.props), 'props,', len(g.enemies), 'enemies,',
-      len(g.world.beacons), 'beacons,', len(g.bosses), 'bosses')
+print('world generated:', len(g.world.objects), 'objects,',
+      len(g.enemies), 'enemies,', len(g.world.beacons), 'beacons,',
+      len(g.bosses), 'bosses')
 
 frames(g, 5)
 shot(g, 'ss_title.png')
@@ -80,7 +80,7 @@ shot(g, 'ss_map.png')
 press(g, pygame.K_m)
 
 # talk to Maya (teleport near)
-g.player.x, g.player.y = 38.5, 128.5
+g.player.x, g.player.y = 19.2, 64.2
 frames(g, 3)
 press(g, pygame.K_e)
 frames(g, 3)
@@ -91,7 +91,7 @@ while g.state == 'dialogue':
     frames(g, 2)
 
 # rest at beacon
-g.player.x, g.player.y = 35.4, 127.4
+g.player.x, g.player.y = 17.7, 63.7
 frames(g, 3)
 press(g, pygame.K_e)
 frames(g, 3)
@@ -130,7 +130,7 @@ def fight_boss(g, key, arena_xy):
 
 
 # go fight the Warden
-g.player.x, g.player.y = 17.0, 56.0
+g.player.x, g.player.y = 8.5, 30.0
 frames(g, 10)
 print('boss state:', g.state)
 shot(g, 'ss_boss_intro.png')
@@ -152,7 +152,7 @@ print('warden defeated?', 'warden' in g.bosses_defeated, 'shards', g.player.shar
 assert 'warden' in g.bosses_defeated
 
 # die on purpose, away from boss arenas
-g.player.x, g.player.y = 100.0, 100.0
+g.player.x, g.player.y = 50.0, 47.0
 g.player.hp = 1
 g.player.hit_iframes = 0
 g.player.iframes = 0
@@ -171,12 +171,12 @@ assert g.state == 'playing'
 assert not g.bosses['warden'].active and 'warden' in g.bosses_defeated
 
 # chorister, then gate should open
-fight_boss(g, 'chorister', (116.0, 37.0))
+fight_boss(g, 'chorister', (58.0, 17.0))
 print('chorister defeated?', 'chorister' in g.bosses_defeated, '| gate open?', g.gate_open)
 assert g.gate_open
 
 # archivist + ending flow
-fight_boss(g, 'archivist', (194.0, 42.0))
+fight_boss(g, 'archivist', (97.0, 21.0))
 print('post-archivist state:', g.state)
 shot(g, 'ss_victory.png')
 assert g.state == 'text'

@@ -10,7 +10,7 @@ from src.weapons import WEAPONS, step_time
 class Player:
     def __init__(self, x, y):
         self.x, self.y = x, y
-        self.radius = 0.55
+        self.radius = 0.32
         # stats
         self.level = 1
         self.vigor = 5
@@ -212,7 +212,7 @@ class Player:
             # small forward drift during the strike
             if wu < self.atk_elapsed < wu + act:
                 self.x, self.y = move_with_collision(world, self.x, self.y,
-                                                     self.fx * 2.2 * dt, self.fy * 2.2 * dt, self.radius)
+                                                     self.fx * 1.1 * dt, self.fy * 1.1 * dt, self.radius)
             if self.atk_elapsed >= wu + act + rec:
                 if self.atk_queued and not self.atk_heavy and self.atk_step + 1 < len(self.weapon['combo']):
                     cost = self.weapon['stamina'] * 0.8
@@ -237,7 +237,7 @@ class Player:
 
         if self.lock_target is not None:
             t = self.lock_target
-            if not getattr(t, 'alive', False) or dist(self.x, self.y, t.x, t.y) > 26:
+            if not getattr(t, 'alive', False) or dist(self.x, self.y, t.x, t.y) > 13:
                 self.lock_target = None
             elif self.state in ('idle', 'walk', 'run'):
                 self.fx, self.fy = norm(t.x - self.x, t.y - self.y)
@@ -265,7 +265,7 @@ class Player:
         d = dist(self.x, self.y, ex, ey)
         if d > w['reach'] + extra:
             return False
-        if d < 0.8:
+        if d < 0.5:
             return True
         ang = math.atan2(ey - self.y, ex - self.x)
         fang = math.atan2(self.fy, self.fx)
@@ -305,35 +305,16 @@ class Player:
         self.trail.clear()
         self.rest()
 
-    # ---- presentation ----
-    def anim(self):
+    # ---- presentation: (anim_name, t_or_progress, mode) ----
+    def anim_state(self):
         if self.state == 'attack':
-            return 'attack'
-        if self.state == 'run':
-            return 'run'
-        if self.state == 'walk':
-            return 'walk'
-        if self.state == 'roll':
-            return 'roll'
+            return ('swing', self.attack_progress(), 'once')
+        if self.state in ('walk', 'run', 'roll'):
+            return ('run', self.anim_t, 'time')
         if self.state == 'parry':
-            return 'parry'
+            return ('block', 1.0 - self.timer / (PARRY_WINDOW + PARRY_RECOVER), 'once')
         if self.state == 'stim':
-            return 'drink'
+            return ('cast', 1.0 - self.timer / STIM_TIME, 'once')
         if self.state == 'dead':
-            return 'dead'
-        return 'idle'
-
-    def anim_time(self):
-        if self.state in ('roll', 'parry', 'stim', 'dead'):
-            if self.state == 'roll':
-                return 1.0 - self.timer / ROLL_TIME
-            if self.state == 'dead':
-                return self.state_t
-            total = (PARRY_WINDOW + PARRY_RECOVER) if self.state == 'parry' else STIM_TIME
-            return 1.0 - self.timer / total
-        return self.anim_t
-
-    def attack_info(self):
-        if self.state == 'attack':
-            return (self.attack_kind(), self.attack_progress(), self.atk_step)
-        return None
+            return ('die', self.state_t, 'time')
+        return ('stance', self.anim_t, 'time')

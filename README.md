@@ -1,6 +1,6 @@
 # STILLWAKE
 
-*A 2.5D isometric, open-world souls-like set in the modern day.*
+*A 2.5D isometric, open-world souls-like set in the frozen city of Meridian.*
 
 ![gameplay](screenshots/gameplay.png)
 
@@ -62,23 +62,24 @@ python3 main.py
 
 ![boss fight](screenshots/boss_fight.png)
 
-## The world
+## The world & art
 
-A 240×240 fine-tile open city (the player spans tiles — scenery is built from
-small tiles, not player-sized blocks), fully explorable from the first step
-and drawn entirely in code in a bright, classic-RTS daylight style: painterly
-noise-blended terrain with no visible tile grid, curbs, crosswalks and sky
-puddles; sun-lit buildings with sky-reflecting windows, awnings, sign boards,
-fire escapes and rooftop furniture that cast long south-west shadows; wrecked
-cars, cargo containers and street furniture; AoE-style health bars over
-wounded enemies.
-Districts: Maintenance Hub 7, Sleepwalker Boulevard, the Night Market of the
-Last Second, Echo Park, The Long Saturday, the Graveyard of Cranes, The
-Unfinished Mile, Cathedral Plaza, and the Helix Tower.
+A 120×120-tile open city built from **real pre-rendered isometric art** (the
+professional CC-BY-SA tilesets and sprites of [flare-game]): flagstone
+streets, ruined stone compounds with capped wall ends, colonnades, statues,
+market stalls, iron fences, graves, boats and groves. The hero is a fully
+animated 8-direction sprite with layered leather armor and a visible weapon
+in hand that changes with your loadout (hammer, shortsword, quarterstaff,
+maul, cudgel, greatsword). Enemies are the Tolled (zombies), the Unsung
+(skeletons), wardsmen (hobgoblins), bell-imps (goblins) and steeple archers;
+the bosses are a minotaur watch-captain, a lich chorister, a burrowing First
+Subject and the skeletal knight Archivist. Corpses stay where they fall.
 
-Characters are skeletal puppets animated procedurally — walk cycles, wind-ups,
-dodge tucks and weapon arcs are continuous motion with trails, not canned
-sprites.
+Districts: the Foundry Yard, Sleepwalker Rows, the Night Market of the Last
+Second, Echo Garden, The Long Saturday, the Graveyard of Masts, The
+Unfinished Mile, Cathedral Plaza, and the Carillon Spire.
+
+[flare-game]: https://github.com/flareteam/flare-game
 
 ![world map](screenshots/world_map.png)
 
@@ -91,3 +92,10 @@ October 9th — and whose signature is on the work orders.
 `python3 test_smoke.py` runs a headless end-to-end test: boots the game,
 walks, fights, talks, rests, levels, kills all bosses, dies, respawns, and
 reaches both ending screens, saving screenshots along the way.
+
+## Art credits
+
+All sprite and tile art is from [flare-game](https://github.com/flareteam/flare-game)
+by Clint Bellanger and contributors, licensed **CC-BY-SA 3.0**
+(see `assets/flare/CREDITS.txt` and `assets/flare/LICENSE.txt`).
+Game code is original.

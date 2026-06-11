@@ -145,14 +145,13 @@ def draw_beacon_menu(surf, player, sel, message):
 
 
 MINIMAP_COLORS = {
-    'asphalt': (50, 51, 56), 'road': (38, 39, 44), 'sidewalk': (88, 86, 84),
-    'plaza': (84, 80, 88), 'grass': (52, 70, 44), 'dirt': (76, 64, 50),
-    'water': (28, 44, 60), 'sand': (110, 98, 78), 'alley': (44, 44, 48),
-    'lot': (56, 54, 52),
+    'grass': (58, 84, 46), 'meadow': (70, 92, 48), 'dirt': (104, 84, 58),
+    'flag': (108, 106, 110), 'flag2': (92, 92, 96), 'mosaic': (96, 110, 116),
+    'reddirt': (120, 70, 52), 'rubblef': (84, 78, 72), 'water': (38, 64, 96),
 }
 
 _minimap_base = None
-MAP_SCALE = 2
+MAP_SCALE = 3
 
 
 def build_minimap(world):
@@ -161,13 +160,10 @@ def build_minimap(world):
     surf = pygame.Surface((world.w * scale, world.h * scale))
     for y in range(world.h):
         for x in range(world.w):
-            c = MINIMAP_COLORS.get(world.ground[y][x], (60, 60, 60))
-            if world.solid[y][x] and world.ground[y][x] != 'water':
-                c = (max(0, c[0] - 18), max(0, c[1] - 18), max(0, c[2] - 18))
+            c = MINIMAP_COLORS.get(world.kind[y][x], (60, 60, 60))
+            if world.solid[y][x] and world.kind[y][x] != 'water':
+                c = (max(0, c[0] - 22), max(0, c[1] - 22), max(0, c[2] - 22))
             surf.fill(c, (x * scale, y * scale, scale, scale))
-    for b in world.buildings:
-        col = (96, 98, 108) if b.style != 'tower' else (120, 200, 240)
-        surf.fill(col, (b.x * scale, b.y * scale, b.fw * scale, b.fh * scale))
     _minimap_base = surf
     return surf
 
@@ -221,7 +217,7 @@ def draw_title(surf, t):
                 pygame.draw.rect(surf, (150, 130, 70), (wx, wy, 3, 5))
     pulse = 0.5 + 0.5 * math.sin(t * 2)
     text(surf, "S T I L L W A K E", WIDTH // 2, 240, F_TITLE, C_ACCENT, center=True)
-    text(surf, "a tale of the Stillness — Meridian City, three years in",
+    text(surf, "a tale of the Stillness — the city of Meridian, three years in",
          WIDTH // 2, 300, F_MED, C_TEXT_DIM, center=True)
     col = (int(120 + 100 * pulse),) * 3
     text(surf, "PRESS ENTER", WIDTH // 2, 480, F_MED, col, center=True)
