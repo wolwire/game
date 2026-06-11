@@ -32,7 +32,8 @@ python3 main.py
 | `J` / `K` | light / heavy attack |
 | `L` | parry (staggers attackers, opens ripostes) |
 | `Q` | stim (heal, refills at beacons) |
-| `E` | interact — rest, talk, read, reclaim shards |
+| `E` | interact — rest, talk, read, loot, reclaim shards |
+| `R` | switch weapon |
 | `TAB` | lock-on / cycle targets |
 | `M` | city map |
 | `ESC` | pause |
@@ -46,7 +47,14 @@ python3 main.py
 - **Relay beacons** are bonfires: rest to heal, refill stims and level up
   (Vigor / Endurance / Strength) — but resting revives the whole city.
 - **Stamina governs everything**: attacks, rolls, sprinting. Greed kills.
-- **Riot husks** block frontal hits — circle them, or parry.
+- **Six weapons, six movesets** — pipe wrench, machete, rebar spear,
+  demolition sledge, the Warden's stun baton and the Choir Blade — each with
+  its own combo chain, heavy attack, reach, arc and stagger power. Found in
+  the world and taken from bosses. Switch with `R`.
+- **Riot husks** block frontal hits — circle them, parry, or break their
+  guard with heavy stagger weapons.
+- **Loot the city**: supply caches in courtyards and container yards hold
+  shards, stim-capacity upgrades and max-HP memory anchors.
 - **Four bosses** with telegraphed attacks and second phases. Two of them —
   the Warden and the Chorister — hold the toll the Helix Tower demands
   before its fog gate opens. One is optional, and was a very good dog.
@@ -56,11 +64,19 @@ python3 main.py
 
 ## The world
 
-A 120×120-tile open city, fully explorable from the first step, drawn entirely
-in code (no asset files) — buildings with lit windows, wrecked cars, looping
-rain. Districts: Maintenance Hub 7, Sleepwalker Boulevard, the Night Market of
-the Last Second, Echo Park, The Long Saturday, the Graveyard of Cranes, The
+A 240×240 fine-tile open city (the player spans tiles — scenery is built from
+small tiles, not player-sized blocks), fully explorable from the first step
+and drawn entirely in code: pre-rendered ground chunks with curbs, crosswalks,
+puddles and grime; buildings with lit windows, storefront awnings, neon signs,
+fire escapes and rooftop furniture; wrecked cars; a real-time lightmap with
+sodium lampposts, neon spill and signal-blue beacons under looping rain.
+Districts: Maintenance Hub 7, Sleepwalker Boulevard, the Night Market of the
+Last Second, Echo Park, The Long Saturday, the Graveyard of Cranes, The
 Unfinished Mile, Cathedral Plaza, and the Helix Tower.
+
+Characters are skeletal puppets animated procedurally — walk cycles, wind-ups,
+dodge tucks and weapon arcs are continuous motion with trails, not canned
+sprites.
 
 ![world map](screenshots/world_map.png)
 

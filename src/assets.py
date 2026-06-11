@@ -1,396 +1,703 @@
-"""Procedural asset library.
+"""Procedural asset library, production pass.
 
-Every sprite in the game is generated here at startup and cached, so the game
-needs no external art files. All factories return (surface, (ax, ay)) where
-(ax, ay) is the anchor: the pixel inside the surface that should be placed at
-the object's projected screen position (its ground point).
+Ground is painted tile-by-tile into pre-rendered chunk surfaces (rich texture
+is free at runtime). Props/buildings return (surface, (ax, ay)) where the
+anchor is the pixel placed at the object's projected ground point.
 """
 import math
 import random
 import pygame
-from src.constants import TILE_W, TILE_H, HALF_W, HALF_H
+from src.constants import TILE_W, TILE_H, HALF_W, HALF_H, CHUNK
 
 _cache = {}
-
-
-def _key(*parts):
-    return parts
 
 
 def _rand(seed):
     return random.Random(seed)
 
 
-def _shade(color, f):
+def sh(color, f):
     return (max(0, min(255, int(color[0] * f))),
             max(0, min(255, int(color[1] * f))),
             max(0, min(255, int(color[2] * f))))
 
 
-def diamond_points(ox, oy, w=TILE_W, h=TILE_H):
+def diamond(ox, oy, w=TILE_W, h=TILE_H):
     return [(ox + w // 2, oy), (ox + w, oy + h // 2),
             (ox + w // 2, oy + h), (ox, oy + h // 2)]
 
 
-# ---------------------------------------------------------------- ground ---
-
+# =================================================================== ground
 GROUND_COLORS = {
-    'asphalt':   (52, 53, 58),
-    'road':      (44, 45, 50),
-    'sidewalk':  (108, 106, 102),
-    'plaza':     (96, 92, 100),
-    'grass':     (58, 78, 48),
-    'dirt':      (84, 72, 56),
-    'water':     (30, 48, 66),
-    'sand':      (122, 110, 86),
-    'rubble':    (70, 66, 62),
-    'lot':       (60, 58, 56),
+    'asphalt':  (47, 48, 54),
+    'road':     (40, 41, 47),
+    'sidewalk': (98, 96, 94),
+    'plaza':    (88, 84, 94),
+    'grass':    (50, 68, 42),
+    'dirt':     (78, 66, 52),
+    'water':    (24, 40, 58),
+    'sand':     (116, 104, 82),
+    'lot':      (56, 54, 53),
+    'alley':    (40, 40, 44),
 }
 
 
-def ground_tile(kind, variant=0):
-    k = _key('ground', kind, variant)
-    if k in _cache:
-        return _cache[k]
-    rng = _rand(hash(k) & 0xffffffff)
-    surf = pygame.Surface((TILE_W, TILE_H + 4), pygame.SRCALPHA)
+def _noise_dots(surf, rng, pts, n, lo, hi, base):
+    minx = min(p[0] for p in pts) + 4
+    maxx = max(p[0] for p in pts) - 4
+    cy = (pts[0][1] + pts[2][1]) // 2
+    for _ in range(n):
+        x = rng.randint(minx, maxx)
+        y = cy + rng.randint(-5, 5)
+        surf.set_at((x, y), sh(base, rng.uniform(lo, hi)))
+
+
+def paint_tile(surf, ox, oy, kind, wx, wy, world=None):
+    """Paint one ground tile (diamond at ox,oy) with rich texture."""
+    rng = _rand((wx * 73856093) ^ (wy * 19349663))
     base = GROUND_COLORS.get(kind, (60, 60, 60))
-    jitter = rng.randint(-4, 4)
-    base = _shade(base, 1 + jitter / 100)
-    pts = diamond_points(0, 0)
+    base = sh(base, 1 + rng.randint(-5, 5) / 100)
+    pts = diamond(ox, oy)
     pygame.draw.polygon(surf, base, pts)
 
-    if kind in ('asphalt', 'road', 'lot'):
-        for _ in range(7):
-            x = rng.randint(10, TILE_W - 10)
-            y = rng.randint(4, TILE_H - 4)
-            c = _shade(base, rng.uniform(0.85, 1.15))
-            surf.set_at((x, y), c)
-        if rng.random() < 0.18:  # crack
-            x, y = rng.randint(16, 48), rng.randint(8, 20)
-            for _ in range(4):
-                nx, ny = x + rng.randint(-6, 6), y + rng.randint(-3, 3)
-                pygame.draw.line(surf, _shade(base, 0.7), (x, y), (nx, ny))
+    if kind in ('asphalt', 'road', 'lot', 'alley'):
+        _noise_dots(surf, rng, pts, 6, 0.82, 1.16, base)
+        if rng.random() < 0.10:  # crack
+            x, y = ox + rng.randint(8, 24), oy + rng.randint(4, 12)
+            for _ in range(3):
+                nx, ny = x + rng.randint(-5, 5), y + rng.randint(-2, 2)
+                pygame.draw.line(surf, sh(base, 0.66), (x, y), (nx, ny))
                 x, y = nx, ny
+        if kind in ('road', 'asphalt') and rng.random() < 0.05:  # oil stain
+            pygame.draw.ellipse(surf, sh(base, 0.78),
+                                (ox + rng.randint(6, 16), oy + rng.randint(3, 8),
+                                 rng.randint(8, 14), rng.randint(4, 7)))
+        if rng.random() < 0.045:  # puddle with cold reflection
+            px, py = ox + rng.randint(7, 15), oy + rng.randint(3, 8)
+            pw, ph = rng.randint(9, 15), rng.randint(4, 7)
+            pygame.draw.ellipse(surf, (38, 48, 66), (px, py, pw, ph))
+            pygame.draw.ellipse(surf, (70, 92, 122), (px + 2, py + 1, pw - 4, 2))
     elif kind in ('sidewalk', 'plaza'):
-        pygame.draw.line(surf, _shade(base, 0.82), pts[0], pts[2])
-        pygame.draw.line(surf, _shade(base, 0.82), pts[3], pts[1])
+        # slab seams along the diamond axes
+        if (wx + wy) % 2 == 0:
+            pygame.draw.line(surf, sh(base, 0.90), pts[0], pts[2])
+        else:
+            pygame.draw.line(surf, sh(base, 0.93), pts[3], pts[1])
+        _noise_dots(surf, rng, pts, 4, 0.92, 1.08, base)
+        if kind == 'plaza' and (wx % 6 == 0 and wy % 6 == 0):
+            pygame.draw.polygon(surf, sh(base, 1.07), diamond(ox + 8, oy + 4, 16, 8))
+        if rng.random() < 0.05:
+            pygame.draw.line(surf, sh(base, 0.66), (ox + 10, oy + 6),
+                             (ox + 10 + rng.randint(4, 9), oy + 6 + rng.randint(-2, 3)))
     elif kind == 'grass':
-        for _ in range(10):
-            x = rng.randint(12, TILE_W - 12)
-            y = rng.randint(5, TILE_H - 5)
-            c = _shade((70, 95, 52), rng.uniform(0.8, 1.2))
-            pygame.draw.line(surf, c, (x, y), (x + rng.randint(-1, 1), y - 2))
+        for _ in range(8):
+            x = ox + rng.randint(6, TILE_W - 8)
+            y = oy + rng.randint(3, TILE_H - 3)
+            c = sh((62, 88, 48), rng.uniform(0.75, 1.25))
+            pygame.draw.line(surf, c, (x, y), (x + rng.randint(-1, 1), y - rng.randint(1, 3)))
+        if rng.random() < 0.08:  # dirt patch
+            pygame.draw.ellipse(surf, sh((78, 66, 52), rng.uniform(0.9, 1.1)),
+                                (ox + rng.randint(6, 14), oy + rng.randint(3, 8), 10, 5))
+        if rng.random() < 0.06:  # tiny flowers
+            for _ in range(3):
+                surf.set_at((ox + rng.randint(8, 24), oy + rng.randint(4, 12)),
+                            rng.choice([(200, 190, 120), (190, 140, 160)]))
     elif kind == 'water':
-        for i in range(3):
-            y = 8 + i * 7 + rng.randint(-2, 2)
-            pygame.draw.line(surf, _shade(base, 1.3), (14 + i * 4, y), (30 + i * 6, y))
-    elif kind == 'rubble':
-        for _ in range(6):
-            x = rng.randint(10, TILE_W - 14)
-            y = rng.randint(5, TILE_H - 8)
-            c = _shade(base, rng.uniform(0.7, 1.25))
-            pygame.draw.polygon(surf, c, [(x, y), (x + 4, y + 1), (x + 3, y + 3), (x - 1, y + 2)])
-    # subtle edge shading so tiles read as a surface
-    pygame.draw.lines(surf, _shade(base, 0.9), False, [pts[3], pts[2], pts[1]])
-    _cache[k] = (surf, (HALF_W, HALF_H))
-    return _cache[k]
+        for i in range(2):
+            y = oy + 4 + i * 6 + rng.randint(-1, 1)
+            x = ox + rng.randint(6, 12)
+            pygame.draw.line(surf, sh(base, 1.45), (x, y), (x + rng.randint(6, 12), y))
+        if rng.random() < 0.2:
+            pygame.draw.line(surf, (60, 90, 116), (ox + 8, oy + 10), (ox + 20, oy + 10))
+    elif kind in ('dirt', 'sand'):
+        _noise_dots(surf, rng, pts, 7, 0.85, 1.15, base)
+        if rng.random() < 0.1:
+            pygame.draw.ellipse(surf, sh(base, 0.8),
+                                (ox + rng.randint(8, 16), oy + rng.randint(4, 8), 6, 3))
+
+    # neighbor-aware edges: curbs & shorelines
+    if world is not None:
+        def g(x, y):
+            if 0 <= x < world.w and 0 <= y < world.h:
+                return world.ground[y][x]
+            return kind
+        if kind == 'sidewalk':
+            curb = sh(base, 1.35)
+            if g(wx + 1, wy) in ('road', 'asphalt'):   # SE edge
+                pygame.draw.line(surf, curb, pts[0], pts[1], 2)
+            if g(wx, wy + 1) in ('road', 'asphalt'):   # SW edge
+                pygame.draw.line(surf, curb, pts[1], pts[2], 2)
+            if g(wx - 1, wy) in ('road', 'asphalt'):
+                pygame.draw.line(surf, curb, pts[2], pts[3], 2)
+            if g(wx, wy - 1) in ('road', 'asphalt'):
+                pygame.draw.line(surf, curb, pts[3], pts[0], 2)
+        elif kind == 'water':
+            foam = (96, 122, 142)
+            if g(wx - 1, wy) not in ('water',):
+                pygame.draw.line(surf, foam, pts[2], pts[3], 1)
+            if g(wx, wy - 1) not in ('water',):
+                pygame.draw.line(surf, foam, pts[3], pts[0], 1)
+        elif kind == 'grass' and g(wx + 1, wy) in ('sidewalk', 'plaza', 'asphalt', 'road'):
+            pygame.draw.line(surf, sh(base, 0.7), pts[0], pts[1], 1)
 
 
-def road_marking(kind):
-    """Overlay decals for roads: lane dashes / crosswalks, in both axes."""
-    k = _key('mark', kind)
-    if k in _cache:
-        return _cache[k]
-    surf = pygame.Surface((TILE_W, TILE_H), pygame.SRCALPHA)
-    col = (188, 182, 150, 110)
-    cx, cy = HALF_W, HALF_H
-    if kind == 'dash_x':   # dashes running along world +x (screen down-right)
-        pygame.draw.line(surf, col, (cx - 10, cy - 5), (cx + 10, cy + 5), 2)
+def paint_decal(surf, ox, oy, kind, wx, wy):
+    rng = _rand((wx * 31 + wy * 57) & 0xffffff)
+    cx, cy = ox + HALF_W, oy + HALF_H
+    if kind == 'dash_x':
+        pygame.draw.line(surf, (176, 172, 142), (cx - 7, cy - 3), (cx + 7, cy + 3), 2)
     elif kind == 'dash_y':
-        pygame.draw.line(surf, col, (cx + 10, cy - 5), (cx - 10, cy + 5), 2)
-    elif kind == 'cross_x':
-        for i in range(-2, 3):
-            ox = i * 9
-            pygame.draw.line(surf, (170, 168, 150, 130), (cx + ox - 7, cy + i * 0 - 4 + ox * 0.0 + 4 - 8), (cx + ox + 7, cy + 4 - 8 + 7), 3)
-        surf.fill((0, 0, 0, 0))
-        for i in range(-2, 3):
-            x0, y0 = cx + i * 8 - 8, cy + i * 4 - 8
-            pygame.draw.line(surf, (172, 170, 152, 120), (x0, y0 + 8), (x0 + 16, y0 + 16), 4)
+        pygame.draw.line(surf, (176, 172, 142), (cx + 7, cy - 3), (cx - 7, cy + 3), 2)
+    elif kind == 'cross_x':   # crosswalk stripes for a road running along x
+        pygame.draw.line(surf, (168, 166, 150), (cx - 8, cy - 4), (cx - 1, cy - 1), 3)
+        pygame.draw.line(surf, (168, 166, 150), (cx + 1, cy + 1), (cx + 8, cy + 4), 3)
+    elif kind == 'cross_y':
+        pygame.draw.line(surf, (168, 166, 150), (cx + 8, cy - 4), (cx + 1, cy - 1), 3)
+        pygame.draw.line(surf, (168, 166, 150), (cx - 1, cy + 1), (cx - 8, cy + 4), 3)
     elif kind == 'manhole':
-        pygame.draw.ellipse(surf, (38, 38, 40), (cx - 7, cy - 4, 14, 8))
-        pygame.draw.ellipse(surf, (70, 70, 72), (cx - 7, cy - 4, 14, 8), 1)
-    _cache[k] = (surf, (HALF_W, HALF_H))
-    return _cache[k]
+        pygame.draw.ellipse(surf, (30, 30, 33), (cx - 6, cy - 3, 12, 6))
+        pygame.draw.ellipse(surf, (66, 66, 70), (cx - 6, cy - 3, 12, 6), 1)
+        pygame.draw.line(surf, (66, 66, 70), (cx - 3, cy), (cx + 3, cy), 1)
+    elif kind == 'grime':
+        for _ in range(5):
+            surf.set_at((cx + rng.randint(-8, 8), cy + rng.randint(-4, 4)), (30, 30, 32))
+    elif kind == 'leaf':
+        for _ in range(4):
+            surf.set_at((cx + rng.randint(-9, 9), cy + rng.randint(-4, 4)),
+                        rng.choice([(96, 84, 40), (110, 70, 36)]))
 
 
-# -------------------------------------------------------------- buildings ---
+def render_chunk(world, ccx, ccy):
+    """Pre-render a CHUNK x CHUNK ground chunk. Returns (surf, blit_anchor)."""
+    w = CHUNK * TILE_W
+    h = CHUNK * TILE_H + 8
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    x0, y0 = ccx * CHUNK, ccy * CHUNK
+    for j in range(CHUNK):
+        for i in range(CHUNK):
+            wx, wy = x0 + i, y0 + j
+            if wx >= world.w or wy >= world.h:
+                continue
+            ox = (i - j) * HALF_W + (CHUNK - 1) * HALF_W
+            oy = (i + j) * HALF_H
+            kind = world.ground[wy][wx]
+            paint_tile(surf, ox, oy, kind, wx, wy, world)
+            dec = world.decals.get((wx, wy))
+            if dec:
+                paint_decal(surf, ox, oy, dec, wx, wy)
+    # anchor: tile (x0,y0) top corner sits at local ((CHUNK-1)*HALF_W + HALF_W, 0)
+    return surf, (CHUNK * HALF_W, 0)
 
+
+# ================================================================ buildings
 BUILDING_STYLES = {
-    'brick':    {'wall': (96, 62, 54),  'win': (28, 30, 40), 'lit': (210, 170, 90)},
-    'concrete': {'wall': (110, 110, 116), 'win': (26, 30, 38), 'lit': (160, 200, 230)},
-    'glass':    {'wall': (62, 76, 92),  'win': (40, 58, 76), 'lit': (120, 190, 235)},
-    'shop':     {'wall': (88, 82, 96),  'win': (30, 32, 42), 'lit': (235, 160, 90)},
-    'industrial': {'wall': (92, 84, 70), 'win': (24, 26, 30), 'lit': (200, 120, 70)},
-    'tower':    {'wall': (40, 48, 64),  'win': (52, 70, 96), 'lit': (130, 220, 255)},
+    'brick':      {'wall': (104, 66, 56),  'win': (24, 26, 34), 'lit': (224, 176, 96),  'trim': (78, 50, 44)},
+    'concrete':   {'wall': (116, 116, 122), 'win': (24, 28, 36), 'lit': (170, 205, 235), 'trim': (90, 90, 96)},
+    'glass':      {'wall': (58, 72, 90),   'win': (44, 62, 82), 'lit': (130, 195, 240), 'trim': (40, 52, 66)},
+    'shop':       {'wall': (96, 88, 102),  'win': (28, 30, 40), 'lit': (240, 168, 96),  'trim': (70, 64, 76)},
+    'industrial': {'wall': (98, 90, 74),   'win': (22, 24, 28), 'lit': (210, 130, 76),  'trim': (72, 66, 56)},
+    'house':      {'wall': (118, 96, 78),  'win': (26, 28, 36), 'lit': (228, 184, 108), 'trim': (86, 70, 58)},
+    'tower':      {'wall': (38, 46, 62),   'win': (54, 74, 100), 'lit': (134, 224, 255), 'trim': (28, 34, 46)},
 }
+STORY_PX = 30
+
+NEON_COLORS = [(255, 90, 120), (90, 220, 255), (255, 180, 70), (140, 255, 160), (200, 120, 255)]
+NEON_WORDS = [4, 5, 3, 6]
 
 
 def building(seed, fw, fh, stories, style):
-    """Iso box building over an fw x fh tile footprint, `stories` floors."""
-    k = _key('bld', seed, fw, fh, stories, style)
+    k = ('bld', seed, fw, fh, stories, style)
     if k in _cache:
         return _cache[k]
     rng = _rand(seed)
     st = BUILDING_STYLES[style]
-    story_px = 26
-    zh = stories * story_px
+    zh = stories * STORY_PX
     sw = (fw + fh) * HALF_W
-    sh = (fw + fh) * HALF_H + zh
-    surf = pygame.Surface((sw + 2, sh + 2), pygame.SRCALPHA)
-    # origin: N corner of footprint at (fh*HALF_W, zh)
-    nx, ny = fh * HALF_W, zh
+    shh = (fw + fh) * HALF_H
+    surf = pygame.Surface((sw + 4, shh + zh + 30), pygame.SRCALPHA)
+    nx, ny = fh * HALF_W + 2, zh + 24
     N = (nx, ny)
     E = (nx + fw * HALF_W, ny + fw * HALF_H)
     S = (nx + (fw - fh) * HALF_W, ny + (fw + fh) * HALF_H)
     W = (nx - fh * HALF_W, ny + fh * HALF_H)
     Nt, Et, St, Wt = [(p[0], p[1] - zh) for p in (N, E, S, W)]
 
-    wall = _shade(st['wall'], rng.uniform(0.9, 1.08))
-    left_c = _shade(wall, 0.72)    # SW face (darker)
-    right_c = _shade(wall, 0.92)   # SE face
-    top_c = _shade(wall, 1.12)
+    wall = sh(st['wall'], rng.uniform(0.92, 1.06))
+    left_c, right_c, top_c = sh(wall, 0.62), sh(wall, 0.86), sh(wall, 1.1)
 
     pygame.draw.polygon(surf, left_c, [Wt, St, S, W])
     pygame.draw.polygon(surf, right_c, [St, Et, E, S])
-    pygame.draw.polygon(surf, top_c, [Nt, Et, St, Wt])
-    pygame.draw.lines(surf, _shade(wall, 0.5), True, [Nt, Et, St, Wt], 1)
-    pygame.draw.line(surf, _shade(wall, 0.5), St, S, 1)
-    pygame.draw.line(surf, _shade(wall, 0.55), Wt, W, 1)
-    pygame.draw.line(surf, _shade(wall, 0.55), Et, E, 1)
 
-    def face_windows(p_top_left, axis, n_cols, face_shade):
-        ax_, ay_ = axis
+    # --- facade detailing helper -------------------------------------
+    def face(p0, p1, ncols, fshade, face_id):
+        """Detail the face whose top edge runs p0->p1 (ground edge below)."""
+        axx, axy = p1[0] - p0[0], p1[1] - p0[1]
+        col_w = abs(axx) / max(1, ncols)
         for s in range(stories):
-            wy = p_top_left[1] + s * story_px + 7
-            for c in range(n_cols):
-                t = (c + 0.5) / n_cols
-                wx = p_top_left[0] + ax_ * t
-                yy = wy + ay_ * t
-                lit = rng.random() < 0.13
-                col = st['lit'] if lit else _shade(st['win'], face_shade)
-                w_, h_ = 7, 11
-                quad = [(wx - w_ / 2, yy), (wx + w_ / 2, yy + (ay_ / abs(ax_)) * w_ if ax_ else yy),
-                        (wx + w_ / 2, yy + h_ + (ay_ / abs(ax_)) * w_ if ax_ else yy + h_),
-                        (wx - w_ / 2, yy + h_)]
-                pygame.draw.polygon(surf, col, quad)
-                if lit:
-                    pygame.draw.polygon(surf, _shade(col, 0.6), quad, 1)
+            ytop = p0[1] + s * STORY_PX
+            # floor band
+            band = sh(wall, fshade * 0.92)
+            pygame.draw.line(surf, band, (p0[0], ytop + axy * 0 + 1 + (axy / abs(axx)) * 0 if axx else ytop),
+                             (p0[0], ytop), 1)
+            for c in range(ncols):
+                t0 = (c + 0.18) / ncols
+                t1 = (c + 0.82) / ncols
+                x0 = p0[0] + axx * t0
+                x1 = p0[0] + axx * t1
+                yb0 = p0[1] + axy * t0
+                yb1 = p0[1] + axy * t1
+                wy0 = yb0 + s * STORY_PX + 8
+                wy1 = yb1 + s * STORY_PX + 8
+                hgt = 13
+                r = rng.random()
+                if r < 0.12:
+                    wcol = st['lit']
+                elif r < 0.18:
+                    wcol = sh(st['lit'], 0.55)
+                else:
+                    wcol = sh(st['win'], fshade)
+                quad = [(x0, wy0), (x1, wy1), (x1, wy1 + hgt), (x0, wy0 + hgt)]
+                pygame.draw.polygon(surf, wcol, quad)
+                # frame + sill
+                pygame.draw.polygon(surf, sh(wall, fshade * 0.7), quad, 1)
+                pygame.draw.line(surf, sh(wall, fshade * 1.18),
+                                 (x0, wy0 + hgt + 1), (x1, wy1 + hgt + 1), 1)
+                if r < 0.12:  # glow spill
+                    pygame.draw.polygon(surf, sh(wcol, 0.5),
+                                        [(x0, wy0 + hgt), (x1, wy1 + hgt),
+                                         (x1, wy1 + hgt + 3), (x0, wy0 + hgt + 3)])
+                if rng.random() < 0.07:  # broken window
+                    pygame.draw.line(surf, (12, 12, 16), (x0 + 1, wy0 + 2), (x1 - 1, wy1 + hgt - 3), 2)
+        # dirt streaks
+        for _ in range(fw + fh):
+            t = rng.random()
+            x = p0[0] + axx * t
+            y0_ = p0[1] + axy * t + rng.randint(0, zh // 2)
+            streak = pygame.Surface((2, rng.randint(10, max(11, zh // 2))), pygame.SRCALPHA)
+            streak.fill((10, 10, 12, 38))
+            surf.blit(streak, (x, y0_))
 
-    # SW face: from Wt to St, slope +0.5 ; SE face: from St to Et, slope -0.5
-    face_windows(Wt, (St[0] - Wt[0], St[1] - Wt[1]), max(1, fw * 2 - 1), 0.85)
-    face_windows(St, (Et[0] - St[0], Et[1] - St[1]), max(1, fh * 2 - 1), 1.0)
+    face(Wt, St, max(1, fw), 0.62, 0)
+    face(St, Et, max(1, fh), 0.86, 1)
 
-    # roof details
-    if rng.random() < 0.6:
-        bx = (Nt[0] + St[0]) / 2 + rng.randint(-8, 8)
-        by = (Nt[1] + St[1]) / 2 + rng.randint(-4, 4)
-        pygame.draw.polygon(surf, _shade(top_c, 0.8),
-                            [(bx, by - 6), (bx + 10, by - 1), (bx, by + 4), (bx - 10, by - 1)])
+    # --- ground floor -------------------------------------------------
+    if style in ('shop', 'brick') and stories >= 1:
+        # storefront on SW face: big window, door, awning, neon sign
+        gx0, gy0 = W[0] + 3, W[1] - 1
+        gx1, gy1 = S[0] - 2, S[1] - 1
+        mid = 0.55
+        pygame.draw.polygon(surf, (26, 30, 40),
+                            [(gx0, gy0 - 16), (gx0 + (gx1 - gx0) * mid, gy0 + (gy1 - gy0) * mid - 16),
+                             (gx0 + (gx1 - gx0) * mid, gy0 + (gy1 - gy0) * mid - 2), (gx0, gy0 - 2)])
+        pane = (64, 84, 104) if rng.random() < 0.5 else (40, 44, 56)
+        pygame.draw.polygon(surf, pane,
+                            [(gx0 + 2, gy0 - 14),
+                             (gx0 + (gx1 - gx0) * mid - 2, gy0 + (gy1 - gy0) * mid - 14),
+                             (gx0 + (gx1 - gx0) * mid - 2, gy0 + (gy1 - gy0) * mid - 4),
+                             (gx0 + 2, gy0 - 4)])
+        pygame.draw.line(surf, (130, 160, 190), (gx0 + 3, gy0 - 13),
+                         (gx0 + (gx1 - gx0) * mid - 4, gy0 + (gy1 - gy0) * mid - 13), 1)
+        # door
+        dx0 = gx0 + (gx1 - gx0) * 0.7
+        dy0 = gy0 + (gy1 - gy0) * 0.7
+        pygame.draw.polygon(surf, (34, 30, 28),
+                            [(dx0, dy0 - 15), (dx0 + 7, dy0 - 11.5), (dx0 + 7, dy0 + 1), (dx0, dy0 - 2)])
+        # awning
+        aw = rng.choice([(168, 60, 60), (60, 110, 150), (150, 120, 60), (80, 130, 80)])
+        pygame.draw.polygon(surf, aw, [(gx0 - 1, gy0 - 17), (gx1, gy1 - 17),
+                                       (gx1 + 4, gy1 - 12), (gx0 + 3, gy0 - 12)])
+        for i in range(4):
+            t0 = i / 4
+            pygame.draw.line(surf, sh(aw, 0.7),
+                             (gx0 - 1 + (gx1 - gx0 + 1) * t0 + 2, gy0 - 14 + (gy1 - gy0) * t0),
+                             (gx0 + 3 + (gx1 - gx0 + 1) * t0, gy0 - 12 + (gy1 - gy0) * t0), 2)
+        # neon sign above awning
+        if style == 'shop':
+            neon = rng.choice(NEON_COLORS)
+            sx0 = gx0 + 4
+            sy0 = gy0 - 26
+            nchars = rng.choice(NEON_WORDS)
+            for i in range(nchars):
+                ch_x = sx0 + i * 7
+                ch_y = sy0 + (gy1 - gy0) / max(1, (gx1 - gx0)) * (i * 7) * 0 + i * 3
+                pygame.draw.rect(surf, neon, (ch_x, ch_y, 4, 7), 1)
+            glow = pygame.Surface((nchars * 7 + 14, 22), pygame.SRCALPHA)
+            pygame.draw.ellipse(glow, (*neon, 36), glow.get_rect())
+            surf.blit(glow, (sx0 - 7, sy0 - 6))
+
+    # fire escape on some brick/concrete buildings (SE face)
+    if style in ('brick', 'concrete') and stories >= 3 and rng.random() < 0.6:
+        fx = (St[0] + Et[0]) / 2
+        fy = (St[1] + Et[1]) / 2
+        rail = sh(wall, 0.45)
+        for s in range(1, stories):
+            y = fy + s * STORY_PX - STORY_PX // 2
+            pygame.draw.line(surf, rail, (fx - 9, y), (fx + 9, y + 4), 2)
+            pygame.draw.line(surf, rail, (fx - 9, y - 6), (fx + 9, y - 2), 1)
+            pygame.draw.line(surf, rail, (fx - 9, y - 6), (fx - 9, y), 1)
+            pygame.draw.line(surf, rail, (fx + 9, y - 2), (fx + 9, y + 4), 1)
+            pygame.draw.line(surf, rail, (fx - 7, y), (fx + 5, y - STORY_PX + 2), 1)
+
+    # --- roof ----------------------------------------------------------
+    pygame.draw.polygon(surf, top_c, [Nt, Et, St, Wt])
+    # parapet
+    pygame.draw.lines(surf, sh(wall, 1.25), True, [Nt, Et, St, Wt], 2)
+    pygame.draw.lines(surf, sh(wall, 0.4), False, [Wt, St, Et], 1)
+    inner = [(Nt[0], Nt[1] + 3), (Et[0] - 5, Et[1]), (St[0], St[1] - 3), (Wt[0] + 5, Wt[1])]
+    pygame.draw.polygon(surf, sh(top_c, 0.93), inner)
+    # roof furniture
+    def roof_pt(u, v):
+        return (Nt[0] + (Et[0] - Nt[0]) * u + (Wt[0] - Nt[0]) * v,
+                Nt[1] + (Et[1] - Nt[1]) * u + (Wt[1] - Nt[1]) * v)
+    for _ in range(min(3, 1 + stories // 3)):
+        u, v = rng.uniform(0.25, 0.75), rng.uniform(0.25, 0.75)
+        bx, by = roof_pt(u, v)
+        kind = rng.random()
+        if kind < 0.5:  # AC unit
+            pygame.draw.polygon(surf, sh(wall, 0.75), [(bx - 6, by - 1), (bx, by - 4), (bx + 6, by - 1), (bx, by + 2)])
+            pygame.draw.polygon(surf, sh(wall, 0.55), [(bx - 6, by - 1), (bx, by + 2), (bx, by + 7), (bx - 6, by + 4)])
+            pygame.draw.polygon(surf, sh(wall, 0.65), [(bx, by + 2), (bx + 6, by - 1), (bx + 6, by + 4), (bx, by + 7)])
+            pygame.draw.ellipse(surf, sh(wall, 0.4), (bx - 4, by - 2, 8, 4))
+        elif kind < 0.8:  # vent pipe
+            pygame.draw.line(surf, sh(wall, 0.5), (bx, by), (bx, by - 8), 3)
+            pygame.draw.line(surf, sh(wall, 0.7), (bx - 3, by - 8), (bx + 3, by - 8), 3)
+        else:  # antenna
+            pygame.draw.line(surf, (140, 144, 152), (bx, by), (bx, by - 16), 1)
+            pygame.draw.line(surf, (140, 144, 152), (bx - 4, by - 10), (bx + 4, by - 13), 1)
+    if style == 'brick' and stories >= 4 and rng.random() < 0.5:  # water tank
+        bx, by = roof_pt(0.7, 0.3)
+        pygame.draw.ellipse(surf, (60, 48, 40), (bx - 7, by - 18, 14, 6))
+        pygame.draw.rect(surf, (74, 58, 48), (bx - 7, by - 15, 14, 12))
+        pygame.draw.rect(surf, (60, 48, 40), (bx - 7, by - 15, 14, 12), 1)
+        pygame.draw.polygon(surf, (86, 68, 56), [(bx - 8, by - 15), (bx, by - 22), (bx + 8, by - 15)])
     if style == 'tower':
-        tipx, tipy = Nt[0] + (St[0] - Nt[0]) / 2, Nt[1] + (St[1] - Nt[1]) / 2
-        pygame.draw.line(surf, (200, 60, 60), (tipx, tipy), (tipx, tipy - 26), 2)
-        pygame.draw.circle(surf, (255, 90, 90), (int(tipx), int(tipy - 26)), 3)
+        tipx, tipy = roof_pt(0.5, 0.5)
+        pygame.draw.line(surf, (160, 170, 190), (tipx, tipy), (tipx, tipy - 34), 2)
+        pygame.draw.circle(surf, (255, 90, 90), (int(tipx), int(tipy - 34)), 3)
+        # helix logo on SE face top
+        lx, ly = (St[0] + Et[0]) / 2, (St[1] + Et[1]) / 2 - zh + STORY_PX * 1.2
+        for i in range(8):
+            yy = ly + i * 3
+            xx = math.sin(i * 0.9) * 5
+            pygame.draw.circle(surf, (120, 220, 255), (int(lx + xx), int(yy)), 1)
+            pygame.draw.circle(surf, (120, 220, 255), (int(lx - xx), int(yy)), 1)
 
-    # ground-floor storefront for shop style
-    if style == 'shop':
-        pygame.draw.polygon(surf, (40, 36, 50),
-                            [(W[0] + 4, W[1] - 14), (S[0] - 2, S[1] - 12 + 2), (S[0] - 2, S[1] - 2), (W[0] + 4, W[1] - 2)])
-        pygame.draw.line(surf, (235, 170, 90), (W[0] + 4, W[1] - 15), (S[0] - 2, S[1] - 13), 2)
-
-    # anchor: N corner of footprint should land on world_to_screen(gx, gy)
     _cache[k] = (surf, (nx, ny))
     return _cache[k]
 
 
-# ------------------------------------------------------------------ props ---
-
-CAR_COLORS = [(120, 40, 40), (50, 70, 110), (150, 140, 130), (60, 90, 60),
-              (160, 120, 40), (90, 60, 100), (70, 70, 76)]
+# ===================================================================== cars
+CAR_COLORS = [(126, 44, 44), (52, 72, 112), (148, 140, 132), (58, 92, 62),
+              (164, 122, 44), (88, 60, 100), (66, 68, 74), (140, 88, 40)]
 
 
 def car(seed, axis):
-    """Wrecked car. axis 'x' = along world +x, 'y' = along world +y."""
-    k = _key('car', seed, axis)
+    k = ('car', seed, axis)
     if k in _cache:
         return _cache[k]
     rng = _rand(seed)
-    col = _shade(rng.choice(CAR_COLORS), rng.uniform(0.8, 1.0))
-    surf = pygame.Surface((92, 64), pygame.SRCALPHA)
-    cx, cy = 46, 44
-
-    def iso_quad(px, py, dx1, dy1, dx2, dy2, color):
-        pygame.draw.polygon(surf, color, [(px, py), (px + dx1, py + dy1),
-                                          (px + dx1 + dx2, py + dy1 + dy2), (px + dx2, py + dy2)])
-    L, Wd, Hb = 60, 28, 14  # length, width, body height in px
+    col = sh(rng.choice(CAR_COLORS), rng.uniform(0.75, 1.0))
+    surf = pygame.Surface((96, 64), pygame.SRCALPHA)
+    cx, cy = 48, 46
+    L, Wd, Hb = 66, 26, 13
     if axis == 'x':
-        lx, ly = L * 0.55, L * 0.275      # long axis screen vector (down-right)
-        wxp, wyp = -Wd * 0.55, Wd * 0.275  # width axis (down-left)
+        lx, ly = L * 0.55, L * 0.275
+        wxp, wyp = -Wd * 0.55, Wd * 0.275
     else:
         lx, ly = -L * 0.55, L * 0.275
         wxp, wyp = Wd * 0.55, Wd * 0.275
     ox, oy = cx - (lx + wxp) / 2, cy - (ly + wyp) / 2 - Hb
-    # body sides + top
-    iso_quad(ox, oy + Hb, lx, ly, wxp, wyp, _shade(col, 0.55))          # shadow base
-    iso_quad(ox, oy, lx, ly, 0, Hb, _shade(col, 0.8 if axis == 'x' else 0.65))
-    iso_quad(ox + lx, oy + ly, wxp, wyp, 0, Hb, _shade(col, 0.65 if axis == 'x' else 0.8))
-    iso_quad(ox, oy, lx, ly, wxp, wyp, col)
+
+    def quad(px, py, dx1, dy1, dx2, dy2, color, width=0):
+        pygame.draw.polygon(surf, color, [(px, py), (px + dx1, py + dy1),
+                                          (px + dx1 + dx2, py + dy1 + dy2), (px + dx2, py + dy2)], width)
+    # shadow
+    spts = [(ox - 2, oy + Hb + 2), (ox + lx - 2, oy + ly + Hb + 2),
+            (ox + lx + wxp - 2, oy + ly + wyp + Hb + 2), (ox + wxp - 2, oy + wyp + Hb + 2)]
+    sh_s = pygame.Surface((96, 64), pygame.SRCALPHA)
+    pygame.draw.polygon(sh_s, (0, 0, 0, 90), spts)
+    surf.blit(sh_s, (0, 0))
+    # wheels
+    for t in (0.18, 0.82):
+        for sgn in (0.1, 0.9):
+            wx_ = ox + lx * t + wxp * sgn
+            wy_ = oy + ly * t + wyp * sgn + Hb
+            pygame.draw.ellipse(surf, (18, 18, 20), (wx_ - 4, wy_ - 2, 8, 6))
+    # body
+    quad(ox, oy, lx, ly, 0, Hb, sh(col, 0.78 if axis == 'x' else 0.6))
+    quad(ox + lx, oy + ly, wxp, wyp, 0, Hb, sh(col, 0.6 if axis == 'x' else 0.78))
+    quad(ox, oy, lx, ly, wxp, wyp, col)
+    quad(ox, oy, lx, ly, wxp, wyp, sh(col, 0.5), 1)
+    # hood/trunk shading
+    quad(ox + lx * 0.78, oy + ly * 0.78, lx * 0.2, ly * 0.2, wxp, wyp, sh(col, 1.12))
     # cabin
-    cab_t = 0.28
-    cox, coy = ox + lx * cab_t + wxp * 0.15, oy + ly * cab_t + wyp * 0.15 - 9
-    iso_quad(cox, coy, lx * 0.42, ly * 0.42, wxp * 0.7, wyp * 0.7, _shade(col, 1.15))
-    iso_quad(cox, coy, lx * 0.42, ly * 0.42, 0, 9, (30, 38, 48))
-    iso_quad(cox + lx * 0.42, coy + ly * 0.42, wxp * 0.7, wyp * 0.7, 0, 9, (24, 30, 40))
-    if rng.random() < 0.5:  # rust / damage
-        for _ in range(4):
+    cab_t = 0.30
+    cox, coy = ox + lx * cab_t + wxp * 0.12, oy + ly * cab_t + wyp * 0.12 - 9
+    quad(cox, coy, lx * 0.40, ly * 0.40, 0, 9, (28, 36, 48))
+    quad(cox + lx * 0.40, coy + ly * 0.40, wxp * 0.76, wyp * 0.76, 0, 9, (22, 28, 38))
+    quad(cox, coy, lx * 0.40, ly * 0.40, wxp * 0.76, wyp * 0.76, sh(col, 1.2))
+    # windshield glint
+    pygame.draw.line(surf, (120, 150, 180),
+                     (cox + lx * 0.4 + wxp * 0.1, coy + ly * 0.4 + wyp * 0.1 + 2),
+                     (cox + lx * 0.4 + wxp * 0.6, coy + ly * 0.4 + wyp * 0.6 + 2), 2)
+    # lights
+    pygame.draw.circle(surf, (220, 210, 170), (int(ox + lx + wxp * 0.18), int(oy + ly + wyp * 0.18 + 4)), 2)
+    pygame.draw.circle(surf, (220, 210, 170), (int(ox + lx + wxp * 0.82), int(oy + ly + wyp * 0.82 + 4)), 2)
+    pygame.draw.circle(surf, (160, 50, 50), (int(ox + wxp * 0.2), int(oy + wyp * 0.2 + 5)), 2)
+    # damage
+    if rng.random() < 0.6:
+        for _ in range(rng.randint(2, 5)):
             px = ox + lx * rng.random() + wxp * rng.random()
             py = oy + ly * rng.random() + wyp * rng.random()
-            pygame.draw.circle(surf, _shade(col, 0.5), (int(px), int(py)), rng.randint(2, 4))
-    _cache[k] = (surf, (cx, cy + 6))
+            pygame.draw.circle(surf, sh(col, 0.45), (int(px), int(py)), rng.randint(1, 3))
+    if rng.random() < 0.3:  # broken windshield
+        pygame.draw.line(surf, (200, 210, 220), (cox + 4, coy + 4), (cox + 12, coy + 9), 1)
+    _cache[k] = (surf, (cx, cy + 8))
     return _cache[k]
 
 
+# ==================================================================== props
 def prop(kind, variant=0):
-    k = _key('prop', kind, variant)
+    k = ('prop', kind, variant)
     if k in _cache:
         return _cache[k]
     rng = _rand(hash(k) & 0xffffffff)
     if kind == 'lamppost':
-        surf = pygame.Surface((44, 92), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 70), (12, 82, 20, 8))
-        pygame.draw.line(surf, (70, 74, 80), (22, 86), (22, 14), 3)
-        pygame.draw.line(surf, (70, 74, 80), (22, 14), (36, 18), 3)
-        pygame.draw.circle(surf, (255, 196, 110), (37, 20), 4)
-        glow = pygame.Surface((40, 40), pygame.SRCALPHA)
-        pygame.draw.circle(glow, (255, 190, 100, 38), (20, 20), 18)
-        surf.blit(glow, (17, 0))
-        anchor = (22, 86)
+        surf = pygame.Surface((46, 96), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 80), (14, 86, 18, 7))
+        pygame.draw.line(surf, (52, 56, 62), (23, 89), (23, 16), 3)
+        pygame.draw.line(surf, (74, 78, 86), (22, 89), (22, 16), 1)
+        pygame.draw.line(surf, (52, 56, 62), (23, 16), (38, 21), 3)
+        pygame.draw.rect(surf, (40, 42, 48), (35, 18, 8, 5), border_radius=2)
+        pygame.draw.ellipse(surf, (255, 214, 140), (36, 21, 6, 4))
+        anchor = (23, 89)
     elif kind == 'traffic_light':
-        surf = pygame.Surface((30, 80), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 70), (6, 72, 18, 7))
-        pygame.draw.line(surf, (60, 62, 66), (15, 75), (15, 10), 3)
-        pygame.draw.rect(surf, (40, 42, 46), (10, 6, 11, 26), border_radius=3)
-        pygame.draw.circle(surf, (160, 50, 50), (15, 12), 3)
-        pygame.draw.circle(surf, (150, 130, 40), (15, 19), 3)
-        pygame.draw.circle(surf, (60, 110, 60), (15, 26), 3)
-        anchor = (15, 75)
+        surf = pygame.Surface((30, 84), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 80), (8, 76, 16, 6))
+        pygame.draw.line(surf, (48, 50, 56), (15, 79), (15, 10), 3)
+        pygame.draw.rect(surf, (34, 36, 40), (9, 5, 12, 28), border_radius=3)
+        pygame.draw.rect(surf, (20, 22, 26), (9, 5, 12, 28), 1, border_radius=3)
+        pygame.draw.circle(surf, (170, 56, 56), (15, 11), 3)
+        pygame.draw.circle(surf, (70, 62, 30), (15, 19), 3)
+        pygame.draw.circle(surf, (40, 80, 46), (15, 27), 3)
+        anchor = (15, 79)
     elif kind == 'hydrant':
-        surf = pygame.Surface((22, 30), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 70), (4, 23, 14, 6))
-        pygame.draw.rect(surf, (150, 50, 44), (7, 8, 8, 17), border_radius=3)
-        pygame.draw.circle(surf, (170, 60, 50), (11, 8), 5)
-        pygame.draw.rect(surf, (120, 40, 36), (3, 13, 16, 4), border_radius=2)
-        anchor = (11, 26)
+        surf = pygame.Surface((20, 26), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 80), (4, 20, 12, 5))
+        pygame.draw.rect(surf, (152, 50, 44), (7, 7, 7, 15), border_radius=3)
+        pygame.draw.rect(surf, (108, 36, 32), (7, 7, 7, 15), 1, border_radius=3)
+        pygame.draw.circle(surf, (172, 64, 54), (10, 7), 4)
+        pygame.draw.rect(surf, (120, 40, 36), (3, 11, 14, 4), border_radius=2)
+        pygame.draw.line(surf, (210, 120, 110), (8, 9), (8, 18), 1)
+        anchor = (10, 23)
     elif kind == 'dumpster':
-        surf = pygame.Surface((56, 44), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 70), (8, 34, 42, 9))
-        pygame.draw.polygon(surf, (44, 84, 60), [(8, 38), (30, 27), (52, 38), (30, 49)])
-        pygame.draw.polygon(surf, (38, 72, 52), [(8, 38), (8, 22), (30, 11), (30, 27)])
-        pygame.draw.polygon(surf, (50, 96, 70), [(30, 27), (30, 11), (52, 22), (52, 38)])
-        pygame.draw.polygon(surf, (60, 110, 80), [(8, 22), (30, 11), (52, 22), (30, 33)])
-        anchor = (30, 42)
+        surf = pygame.Surface((52, 42), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 80), (6, 32, 42, 9))
+        pygame.draw.polygon(surf, (36, 70, 50), [(6, 36), (28, 25), (48, 35), (26, 46)])
+        pygame.draw.polygon(surf, (30, 58, 42), [(6, 36), (6, 22), (28, 11), (28, 25)])
+        pygame.draw.polygon(surf, (44, 84, 60), [(28, 25), (28, 11), (48, 21), (48, 35)])
+        pygame.draw.polygon(surf, (56, 102, 74), [(6, 22), (28, 11), (48, 21), (26, 32)])
+        pygame.draw.line(surf, (24, 46, 34), (6, 29), (28, 18), 1)
+        pygame.draw.line(surf, (70, 120, 90), (10, 21), (24, 14), 2)  # lid line
+        anchor = (27, 40)
     elif kind == 'bench':
-        surf = pygame.Surface((48, 30), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 60), (6, 22, 36, 7))
-        pygame.draw.polygon(surf, (102, 74, 48), [(6, 22), (28, 11), (42, 18), (20, 29)])
-        pygame.draw.polygon(surf, (84, 60, 40), [(6, 22), (6, 26), (20, 33), (20, 29)])
-        pygame.draw.polygon(surf, (90, 66, 44), [(20, 29), (42, 18), (42, 22), (20, 33)])
-        anchor = (24, 28)
+        surf = pygame.Surface((44, 28), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 70), (5, 21, 34, 6))
+        pygame.draw.polygon(surf, (104, 76, 50), [(5, 20), (26, 10), (39, 16), (18, 26)])
+        pygame.draw.line(surf, (124, 92, 62), (7, 20), (27, 11), 2)
+        pygame.draw.polygon(surf, (80, 58, 38), [(5, 20), (5, 24), (18, 30), (18, 26)])
+        pygame.draw.polygon(surf, (88, 64, 42), [(18, 26), (39, 16), (39, 20), (18, 30)])
+        pygame.draw.line(surf, (60, 44, 30), (9, 24), (9, 28), 2)
+        pygame.draw.line(surf, (60, 44, 30), (34, 19), (34, 23), 2)
+        anchor = (22, 26)
     elif kind == 'barricade':
-        surf = pygame.Surface((52, 36), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 60), (6, 27, 40, 8))
-        pygame.draw.polygon(surf, (180, 120, 40), [(8, 26), (28, 16), (44, 24), (24, 34)])
-        pygame.draw.polygon(surf, (150, 150, 150), [(8, 26), (28, 16), (28, 12), (8, 22)])
+        surf = pygame.Surface((46, 32), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 70), (5, 24, 36, 7))
+        pygame.draw.polygon(surf, (172, 116, 44), [(7, 23), (25, 14), (39, 21), (21, 30)])
+        pygame.draw.polygon(surf, (140, 92, 34), [(7, 23), (7, 19), (25, 10), (25, 14)])
         for i in range(3):
-            pygame.draw.line(surf, (220, 220, 220), (12 + i * 10, 24 - i * 3), (16 + i * 10, 30 - i * 3), 3)
-        anchor = (26, 32)
+            pygame.draw.line(surf, (224, 224, 228), (11 + i * 9, 21 - i * 3), (15 + i * 9, 26 - i * 3), 3)
+        pygame.draw.line(surf, (110, 110, 116), (9, 23), (9, 29), 2)
+        pygame.draw.line(surf, (110, 110, 116), (37, 20), (37, 26), 2)
+        anchor = (23, 28)
     elif kind == 'tree':
-        h = 58 + variant % 3 * 10
-        surf = pygame.Surface((54, h + 14), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 70), (15, h, 24, 10))
-        pygame.draw.line(surf, (74, 56, 40), (27, h + 5), (27, h - 26), 4)
-        for i, (r, yo) in enumerate([(17, -30), (14, -42), (10, -52)]):
-            c = _shade((52, 84, 46), 0.9 + i * 0.12 + (variant % 5) * 0.02)
-            pygame.draw.circle(surf, c, (27 + rng.randint(-3, 3), h + yo), r)
-        anchor = (27, h + 5)
+        h = 64 + variant % 3 * 10
+        surf = pygame.Surface((56, h + 14), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 80), (16, h, 24, 9))
+        pygame.draw.line(surf, (66, 50, 36), (28, h + 4), (28, h - 24), 4)
+        pygame.draw.line(surf, (82, 62, 44), (27, h + 4), (27, h - 24), 1)
+        pygame.draw.line(surf, (66, 50, 36), (28, h - 18), (20, h - 28), 2)
+        pygame.draw.line(surf, (66, 50, 36), (28, h - 22), (36, h - 32), 2)
+        base_c = (46, 76, 42) if variant % 2 == 0 else (54, 82, 40)
+        for i, (r, yo, xo) in enumerate([(16, -34, -4), (14, -44, 6), (13, -52, -3), (9, -60, 2)]):
+            c = sh(base_c, 0.85 + i * 0.13)
+            pygame.draw.circle(surf, c, (28 + xo + rng.randint(-2, 2), h + yo), r)
+        # highlight clumps
+        pygame.draw.circle(surf, sh(base_c, 1.45), (34, h - 52), 5)
+        pygame.draw.circle(surf, sh(base_c, 1.45), (22, h - 40), 4)
+        anchor = (28, h + 4)
     elif kind == 'dead_tree':
         surf = pygame.Surface((44, 64), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 60), (12, 54, 20, 8))
+        pygame.draw.ellipse(surf, (0, 0, 0, 70), (12, 54, 20, 8))
         x, y = 22, 58
-        pygame.draw.line(surf, (66, 56, 48), (x, y), (x - 2, y - 28), 4)
-        pygame.draw.line(surf, (66, 56, 48), (x - 2, y - 28), (x - 12, y - 42), 2)
-        pygame.draw.line(surf, (66, 56, 48), (x - 2, y - 28), (x + 8, y - 46), 2)
-        pygame.draw.line(surf, (60, 52, 44), (x + 8, y - 46), (x + 14, y - 52), 1)
+        pygame.draw.line(surf, (62, 52, 44), (x, y), (x - 2, y - 28), 4)
+        pygame.draw.line(surf, (74, 62, 52), (x - 1, y), (x - 3, y - 28), 1)
+        pygame.draw.line(surf, (62, 52, 44), (x - 2, y - 28), (x - 12, y - 42), 2)
+        pygame.draw.line(surf, (62, 52, 44), (x - 2, y - 28), (x + 8, y - 46), 2)
+        pygame.draw.line(surf, (56, 48, 40), (x + 8, y - 46), (x + 14, y - 52), 1)
+        pygame.draw.line(surf, (56, 48, 40), (x - 12, y - 42), (x - 16, y - 50), 1)
         anchor = (22, 58)
     elif kind == 'bus_stop':
-        surf = pygame.Surface((70, 64), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 60), (10, 52, 50, 10))
-        pygame.draw.polygon(surf, (50, 58, 70, 200), [(10, 24), (40, 9), (60, 19), (30, 34)])
-        pygame.draw.line(surf, (90, 96, 104), (12, 25), (12, 54), 3)
-        pygame.draw.line(surf, (90, 96, 104), (58, 20), (58, 49), 3)
-        pygame.draw.polygon(surf, (70, 110, 140, 90), [(12, 28), (30, 37), (30, 52), (12, 43)])
-        anchor = (35, 56)
-    elif kind == 'debris':
-        surf = pygame.Surface((40, 26), pygame.SRCALPHA)
-        for _ in range(6):
-            x, y = rng.randint(6, 32), rng.randint(8, 20)
-            c = _shade((90, 84, 76), rng.uniform(0.6, 1.2))
-            pygame.draw.polygon(surf, c, [(x, y), (x + 6, y + 2), (x + 4, y + 5), (x - 1, y + 3)])
-        anchor = (20, 18)
+        surf = pygame.Surface((66, 60), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 70), (8, 50, 50, 9))
+        pygame.draw.polygon(surf, (46, 54, 66), [(8, 22), (38, 7), (58, 17), (28, 32)])
+        pygame.draw.polygon(surf, (60, 70, 84), [(8, 22), (38, 7), (58, 17), (28, 32)], 1)
+        pygame.draw.line(surf, (84, 90, 100), (10, 23), (10, 52), 3)
+        pygame.draw.line(surf, (84, 90, 100), (56, 18), (56, 47), 3)
+        pygame.draw.polygon(surf, (66, 104, 134, 84), [(11, 26), (28, 35), (28, 50), (11, 41)])
+        pygame.draw.line(surf, (110, 150, 180), (12, 27), (27, 35), 1)
+        # bench inside
+        pygame.draw.line(surf, (96, 76, 52), (32, 40), (50, 31), 3)
+        anchor = (33, 54)
+    elif kind == 'container':
+        # cargo container, 2 tiles long
+        cols = [(120, 60, 50), (54, 86, 110), (110, 96, 44), (70, 100, 70)]
+        col = cols[variant % len(cols)]
+        surf = pygame.Surface((76, 52), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 80), (6, 38, 64, 12))
+        L, Wd, Hb = 56, 22, 20
+        ox, oy = 12, 36 - Hb
+        lx, ly = L * 0.55, L * 0.275
+        wxp, wyp = -Wd * 0.55, Wd * 0.275
+        ox -= wxp
+        pygame.draw.polygon(surf, sh(col, 0.7), [(ox, oy), (ox + lx, oy + ly), (ox + lx, oy + ly + Hb), (ox, oy + Hb)])
+        pygame.draw.polygon(surf, sh(col, 0.5), [(ox + lx, oy + ly), (ox + lx + wxp, oy + ly + wyp),
+                                                 (ox + lx + wxp, oy + ly + wyp + Hb), (ox + lx, oy + ly + Hb)])
+        pygame.draw.polygon(surf, col, [(ox, oy), (ox + lx, oy + ly), (ox + lx + wxp, oy + ly + wyp), (ox + wxp, oy + wyp)])
+        for i in range(5):  # corrugation
+            t = (i + 0.5) / 5
+            pygame.draw.line(surf, sh(col, 0.58), (ox + lx * t, oy + ly * t + 1), (ox + lx * t, oy + ly * t + Hb - 1), 1)
+        pygame.draw.polygon(surf, sh(col, 0.4), [(ox, oy), (ox + lx, oy + ly), (ox + lx + wxp, oy + ly + wyp), (ox + wxp, oy + wyp)], 1)
+        anchor = (38, 44)
     elif kind == 'crate':
-        surf = pygame.Surface((40, 38), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 60), (6, 28, 28, 9))
-        pygame.draw.polygon(surf, (110, 88, 58), [(6, 30), (20, 23), (34, 30), (20, 37)])
-        pygame.draw.polygon(surf, (94, 74, 48), [(6, 30), (6, 18), (20, 11), (20, 23)])
-        pygame.draw.polygon(surf, (120, 96, 64), [(20, 23), (20, 11), (34, 18), (34, 30)])
-        pygame.draw.polygon(surf, (130, 106, 72), [(6, 18), (20, 11), (34, 18), (20, 25)])
-        anchor = (20, 34)
+        surf = pygame.Surface((36, 34), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 70), (5, 25, 26, 8))
+        pygame.draw.polygon(surf, (104, 84, 56), [(5, 27), (18, 21), (31, 27), (18, 33)])
+        pygame.draw.polygon(surf, (88, 70, 46), [(5, 27), (5, 16), (18, 10), (18, 21)])
+        pygame.draw.polygon(surf, (116, 92, 62), [(18, 21), (18, 10), (31, 16), (31, 27)])
+        pygame.draw.polygon(surf, (126, 102, 70), [(5, 16), (18, 10), (31, 16), (18, 22)])
+        pygame.draw.line(surf, (70, 56, 38), (5, 16), (18, 22), 1)
+        pygame.draw.line(surf, (70, 56, 38), (31, 16), (18, 22), 1)
+        anchor = (18, 30)
+    elif kind == 'debris':
+        surf = pygame.Surface((36, 22), pygame.SRCALPHA)
+        for _ in range(6):
+            x, y = rng.randint(5, 28), rng.randint(7, 17)
+            c = sh((86, 80, 72), rng.uniform(0.6, 1.2))
+            pygame.draw.polygon(surf, c, [(x, y), (x + 5, y + 2), (x + 3, y + 4), (x - 1, y + 2)])
+        if rng.random() < 0.5:
+            pygame.draw.line(surf, (100, 70, 40), (8, 12), (20, 16), 2)
+        anchor = (18, 15)
     elif kind == 'beacon':
-        surf = pygame.Surface((70, 110), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (40, 70, 90, 90), (13, 92, 44, 16))
-        pygame.draw.polygon(surf, (70, 78, 88), [(31, 100), (39, 100), (37, 30), (33, 30)])
-        for yy, w in [(86, 14), (68, 11), (50, 8)]:
-            pygame.draw.line(surf, (96, 104, 116), (35 - w, yy), (35 + w, yy), 2)
-        pygame.draw.circle(surf, (140, 230, 255), (35, 24), 6)
-        glow = pygame.Surface((60, 60), pygame.SRCALPHA)
-        for r, a in [(28, 28), (18, 48), (9, 90)]:
-            pygame.draw.circle(glow, (110, 215, 255, a), (30, 30), r)
-        surf.blit(glow, (5, -6))
-        anchor = (35, 100)
-    elif kind == 'shard_echo':   # dropped shards on death
-        surf = pygame.Surface((36, 36), pygame.SRCALPHA)
-        for r, a in [(16, 36), (10, 70), (5, 130)]:
-            pygame.draw.circle(surf, (150, 210, 255, a), (18, 22), r)
-        pygame.draw.circle(surf, (220, 240, 255), (18, 22), 3)
-        anchor = (18, 26)
+        surf = pygame.Surface((84, 130), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (30, 60, 80, 100), (18, 110, 48, 16))
+        # lattice tower
+        bx = 42
+        for i, (w0, w1, y0, y1) in enumerate([(16, 12, 118, 92), (12, 9, 92, 66), (9, 6, 66, 42)]):
+            pygame.draw.line(surf, (84, 92, 104), (bx - w0, y0), (bx - w1, y1), 2)
+            pygame.draw.line(surf, (64, 72, 84), (bx + w0, y0), (bx + w1, y1), 2)
+            pygame.draw.line(surf, (74, 82, 94), (bx - w0, y0), (bx + w1, y1), 1)
+            pygame.draw.line(surf, (74, 82, 94), (bx + w0, y0), (bx - w1, y1), 1)
+            pygame.draw.line(surf, (90, 98, 110), (bx - w0, y0), (bx + w0, y0), 2)
+        pygame.draw.line(surf, (90, 98, 110), (bx - 6, 42), (bx + 6, 42), 2)
+        pygame.draw.line(surf, (100, 108, 120), (bx, 42), (bx, 22), 3)
+        # dish
+        pygame.draw.ellipse(surf, (110, 118, 130), (bx + 2, 50, 12, 8))
+        pygame.draw.ellipse(surf, (140, 148, 160), (bx + 4, 51, 8, 5))
+        # beacon lamp + glow
+        pygame.draw.circle(surf, (160, 235, 255), (bx, 20), 5)
+        pygame.draw.circle(surf, (235, 250, 255), (bx, 20), 2)
+        glow = pygame.Surface((70, 70), pygame.SRCALPHA)
+        for r, a in [(34, 22), (22, 40), (11, 80)]:
+            pygame.draw.circle(glow, (110, 215, 255, a), (35, 35), r)
+        surf.blit(glow, (bx - 35, -14))
+        anchor = (42, 118)
+    elif kind == 'shard_echo':
+        surf = pygame.Surface((40, 40), pygame.SRCALPHA)
+        for r, a in [(18, 30), (11, 64), (6, 120)]:
+            pygame.draw.circle(surf, (150, 210, 255, a), (20, 24), r)
+        pygame.draw.circle(surf, (225, 242, 255), (20, 24), 3)
+        for i in range(5):
+            a = i * 1.25664
+            pygame.draw.line(surf, (190, 225, 255),
+                             (20 + math.cos(a) * 6, 24 + math.sin(a) * 3),
+                             (20 + math.cos(a) * 11, 24 + math.sin(a) * 5.5), 1)
+        anchor = (20, 28)
     elif kind == 'lore':
-        surf = pygame.Surface((26, 30), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (0, 0, 0, 60), (5, 23, 16, 6))
-        pygame.draw.polygon(surf, (210, 200, 170), [(7, 24), (12, 9), (20, 12), (15, 27)])
-        pygame.draw.line(surf, (120, 110, 90), (11, 14), (17, 16), 1)
-        pygame.draw.line(surf, (120, 110, 90), (10, 18), (16, 20), 1)
-        glow = pygame.Surface((30, 30), pygame.SRCALPHA)
-        pygame.draw.circle(glow, (255, 230, 140, 40), (15, 15), 13)
-        surf.blit(glow, (-2, 2))
-        anchor = (13, 26)
+        surf = pygame.Surface((28, 32), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 70), (6, 25, 16, 6))
+        glow = pygame.Surface((32, 32), pygame.SRCALPHA)
+        pygame.draw.circle(glow, (255, 230, 140, 46), (16, 16), 14)
+        surf.blit(glow, (-2, 4))
+        pygame.draw.polygon(surf, (214, 204, 174), [(8, 26), (13, 11), (21, 14), (16, 29)])
+        pygame.draw.polygon(surf, (160, 150, 120), [(8, 26), (13, 11), (21, 14), (16, 29)], 1)
+        for i in range(3):
+            pygame.draw.line(surf, (124, 114, 94), (12 - i, 15 + i * 3.4), (18 - i, 17 + i * 3.4), 1)
+        anchor = (14, 28)
+    elif kind == 'cache':
+        # supply duffel on a pallet, glowing faintly amber
+        surf = pygame.Surface((44, 36), pygame.SRCALPHA)
+        glow = pygame.Surface((44, 30), pygame.SRCALPHA)
+        pygame.draw.ellipse(glow, (255, 190, 90, 36), glow.get_rect())
+        surf.blit(glow, (0, 8))
+        pygame.draw.polygon(surf, (96, 76, 50), [(6, 28), (22, 20), (38, 28), (22, 36)])
+        pygame.draw.ellipse(surf, (84, 96, 70), (10, 13, 24, 13))
+        pygame.draw.ellipse(surf, (64, 74, 54), (10, 13, 24, 13), 1)
+        pygame.draw.line(surf, (160, 150, 110), (14, 19), (30, 19), 2)
+        pygame.draw.circle(surf, (255, 200, 110), (22, 14), 2)
+        anchor = (22, 33)
+    elif kind == 'weapon_pickup':
+        surf = pygame.Surface((40, 36), pygame.SRCALPHA)
+        glow = pygame.Surface((40, 26), pygame.SRCALPHA)
+        pygame.draw.ellipse(glow, (120, 215, 255, 44), glow.get_rect())
+        surf.blit(glow, (0, 10))
+        # weapon on a tarp
+        pygame.draw.polygon(surf, (52, 58, 70), [(6, 26), (20, 19), (34, 26), (20, 33)])
+        pygame.draw.line(surf, (190, 196, 208), (12, 27), (28, 19), 3)
+        pygame.draw.line(surf, (120, 124, 136), (13, 28), (29, 20), 1)
+        pygame.draw.line(surf, (110, 80, 50), (12, 27), (16, 25), 4)
+        anchor = (20, 31)
     elif kind == 'fountain':
-        surf = pygame.Surface((96, 64), pygame.SRCALPHA)
-        pygame.draw.ellipse(surf, (90, 88, 94), (8, 28, 80, 34))
-        pygame.draw.ellipse(surf, (38, 60, 78), (16, 32, 64, 26))
-        pygame.draw.ellipse(surf, (110, 108, 112), (36, 30, 24, 14))
-        pygame.draw.line(surf, (140, 190, 220), (48, 34), (48, 14), 3)
-        pygame.draw.circle(surf, (170, 210, 235), (48, 12), 4)
-        anchor = (48, 50)
+        surf = pygame.Surface((110, 72), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (74, 72, 80), (8, 30, 94, 40))
+        pygame.draw.ellipse(surf, (96, 94, 100), (8, 26, 94, 40))
+        pygame.draw.ellipse(surf, (30, 52, 72), (18, 31, 74, 30))
+        pygame.draw.ellipse(surf, (58, 86, 110), (24, 34, 62, 22), 1)
+        pygame.draw.ellipse(surf, (104, 102, 108), (42, 28, 26, 14))
+        pygame.draw.ellipse(surf, (84, 82, 88), (42, 32, 26, 12))
+        pygame.draw.line(surf, (140, 186, 216), (55, 32), (55, 10), 3)
+        pygame.draw.circle(surf, (180, 215, 240), (55, 8), 4)
+        for a in range(5):
+            t = a / 4.0
+            pygame.draw.line(surf, (120, 170, 200), (55, 12),
+                             (45 + t * 20, 28), 1)
+        anchor = (55, 54)
+    elif kind == 'phonebooth':
+        surf = pygame.Surface((30, 58), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 70), (6, 50, 18, 7))
+        pygame.draw.rect(surf, (40, 60, 90), (8, 12, 14, 41), border_radius=2)
+        pygame.draw.rect(surf, (28, 42, 64), (8, 12, 14, 41), 2, border_radius=2)
+        pygame.draw.rect(surf, (130, 170, 210, 110), (11, 17, 8, 22))
+        pygame.draw.rect(surf, (60, 86, 120), (8, 8, 14, 6), border_radius=2)
+        anchor = (15, 54)
+    elif kind == 'trash':
+        surf = pygame.Surface((20, 26), pygame.SRCALPHA)
+        pygame.draw.ellipse(surf, (0, 0, 0, 70), (3, 20, 14, 5))
+        pygame.draw.rect(surf, (64, 68, 74), (5, 7, 10, 15), border_radius=2)
+        pygame.draw.rect(surf, (44, 48, 54), (5, 7, 10, 15), 1, border_radius=2)
+        pygame.draw.line(surf, (84, 88, 94), (5, 10), (15, 10), 1)
+        pygame.draw.ellipse(surf, (38, 40, 44), (5, 5, 10, 5))
+        anchor = (10, 23)
     else:
         surf = pygame.Surface((20, 20), pygame.SRCALPHA)
         pygame.draw.circle(surf, (200, 60, 200), (10, 10), 8)
@@ -399,166 +706,40 @@ def prop(kind, variant=0):
     return _cache[k]
 
 
-# ------------------------------------------------------------- characters ---
-
-CHAR_STYLES = {
-    # body, jacket/torso, head/skin, accent
-    'player':   {'body': (40, 46, 58),  'torso': (70, 90, 120), 'skin': (214, 178, 150), 'accent': (87, 199, 255)},
-    'husk':     {'body': (62, 60, 58),  'torso': (84, 78, 70),  'skin': (170, 168, 150), 'accent': (120, 116, 104)},
-    'riot':     {'body': (40, 42, 48),  'torso': (54, 58, 68),  'skin': (90, 94, 104),   'accent': (200, 170, 60)},
-    'stalker':  {'body': (34, 34, 38),  'torso': (46, 44, 52),  'skin': (188, 160, 140), 'accent': (220, 70, 70)},
-    'feral':    {'body': (70, 60, 50),  'torso': (88, 74, 58),  'skin': (88, 74, 58),    'accent': (230, 90, 60)},
-    'drone':    {'body': (70, 74, 84),  'torso': (90, 96, 110), 'skin': (90, 96, 110),   'accent': (255, 90, 90)},
-    'npc_maya': {'body': (52, 40, 58),  'torso': (140, 90, 60), 'skin': (190, 150, 124), 'accent': (255, 200, 110)},
-    'npc_cart': {'body': (44, 50, 46),  'torso': (80, 100, 84), 'skin': (220, 190, 160), 'accent': (160, 230, 190)},
-    'boss_warden':   {'body': (36, 38, 44), 'torso': (60, 64, 76), 'skin': (110, 116, 130), 'accent': (255, 170, 60), 'scale': 1.9},
-    'boss_chorister': {'body': (60, 50, 70), 'torso': (96, 70, 110), 'skin': (200, 190, 210), 'accent': (190, 120, 255), 'scale': 1.55},
-    'boss_archivist': {'body': (30, 40, 52), 'torso': (48, 70, 96), 'skin': (140, 200, 235), 'accent': (130, 230, 255), 'scale': 1.8},
-}
-
-
-def character(style_name, octant, frame=0):
-    """Small 8-direction humanoid. frame 0 = idle, 1/2 = walk, 3 = attack."""
-    k = _key('char', style_name, octant, frame)
-    if k in _cache:
-        return _cache[k]
-    st = CHAR_STYLES[style_name]
-    sc = st.get('scale', 1.0)
-    w, h = int(40 * sc), int(58 * sc)
-    surf = pygame.Surface((w, h), pygame.SRCALPHA)
-    cx = w // 2
-    foot = h - int(4 * sc)
-    # shadow
-    pygame.draw.ellipse(surf, (0, 0, 0, 80),
-                        (cx - int(11 * sc), foot - int(4 * sc), int(22 * sc), int(8 * sc)))
-    if style_name == 'feral':
-        _draw_dog(surf, st, cx, foot, octant, frame, sc)
-        _cache[k] = (surf, (cx, foot))
-        return _cache[k]
-    if style_name == 'drone':
-        _draw_drone(surf, st, cx, foot, frame, sc)
-        _cache[k] = (surf, (cx, foot))
-        return _cache[k]
-
-    ang = octant * math.pi / 4
-    fx = math.cos(ang)            # screen-space facing
-    lean = int(2 * sc) if frame == 3 else 0
-    step = (1 if frame == 1 else -1 if frame == 2 else 0) * int(3 * sc)
-    hipy = foot - int(18 * sc)
-    # legs
-    leg_c = st['body']
-    pygame.draw.line(surf, leg_c, (cx - int(4 * sc), hipy), (cx - int(5 * sc) + step, foot), int(4 * sc))
-    pygame.draw.line(surf, leg_c, (cx + int(4 * sc), hipy), (cx + int(5 * sc) - step, foot), int(4 * sc))
-    # torso
-    tw, th = int(17 * sc), int(20 * sc)
-    torso_rect = pygame.Rect(cx - tw // 2 + lean, hipy - th, tw, th)
-    pygame.draw.rect(surf, st['torso'], torso_rect, border_radius=int(5 * sc))
-    pygame.draw.rect(surf, _shade(st['torso'], 0.7), torso_rect, 1, border_radius=int(5 * sc))
-    # accent stripe
-    pygame.draw.line(surf, st['accent'], (torso_rect.left + 3, torso_rect.top + 3),
-                     (torso_rect.left + 3, torso_rect.bottom - 3), 2)
-    # arms
-    arm_c = _shade(st['torso'], 0.85)
-    sh_y = hipy - th + int(4 * sc)
-    if frame == 3:  # attack: leading arm extended toward facing
-        ex = cx + int(fx * 16 * sc) + lean
-        ey = sh_y + int(6 * sc)
-        pygame.draw.line(surf, arm_c, (cx + lean, sh_y), (ex, ey), int(4 * sc))
-        # weapon (pipe / machete)
-        wx2 = cx + int(fx * 28 * sc) + lean
-        pygame.draw.line(surf, (180, 184, 196), (ex, ey), (wx2, ey - int(3 * sc)), 3)
-    else:
-        sway = step // 2
-        pygame.draw.line(surf, arm_c, (cx - tw // 2 + lean, sh_y), (cx - tw // 2 - int(2 * sc) + sway, hipy - int(2 * sc)), int(3 * sc))
-        pygame.draw.line(surf, arm_c, (cx + tw // 2 + lean, sh_y), (cx + tw // 2 + int(2 * sc) - sway, hipy - int(2 * sc)), int(3 * sc))
-        # sheathed weapon hint for player & stalker
-        if style_name in ('player', 'stalker', 'boss_warden'):
-            pygame.draw.line(surf, (150, 154, 166), (cx - tw // 2 + lean, sh_y + 2),
-                             (cx - tw // 2 - int(6 * sc), sh_y - int(10 * sc)), 2)
-    # head
-    hr = int(6 * sc)
-    hx = cx + int(fx * 2 * sc) + lean
-    hy = hipy - th - hr + int(2 * sc)
-    pygame.draw.circle(surf, st['skin'], (hx, hy), hr)
-    # hair / helmet
-    if style_name == 'riot' or style_name.startswith('boss_warden'):
-        pygame.draw.circle(surf, _shade(st['torso'], 1.2), (hx, hy - 1), hr, 0,
-                           draw_top_left=True, draw_top_right=True)
-        pygame.draw.line(surf, st['accent'], (hx - hr + 2, hy), (hx + hr - 2, hy), 2)
-    else:
-        pygame.draw.circle(surf, _shade(st['body'], 1.3), (hx, hy - 2), hr - 1, 0,
-                           draw_top_left=True, draw_top_right=True)
-    # eye glint showing facing
-    pygame.draw.circle(surf, st['accent'], (hx + int(fx * 3), hy), max(1, int(1.4 * sc)))
-    _cache[k] = (surf, (cx, foot))
-    return _cache[k]
-
-
-def _draw_dog(surf, st, cx, foot, octant, frame, sc):
-    ang = octant * math.pi / 4
-    fx = math.cos(ang)
-    bl = int(20 * sc)
-    bx = cx - int(fx * bl / 2)
-    by = foot - int(10 * sc)
-    step = (2 if frame == 1 else -2 if frame == 2 else 0)
-    pygame.draw.line(surf, st['body'], (bx - 5, by + 3), (bx - 6 + step, foot), 3)
-    pygame.draw.line(surf, st['body'], (bx + 5, by + 3), (bx + 6 - step, foot), 3)
-    pygame.draw.ellipse(surf, st['torso'], (bx - bl // 2, by - 6, bl, 12))
-    hx = bx + int(fx * (bl // 2 + 4))
-    hy = by - 4 if frame != 3 else by
-    pygame.draw.circle(surf, st['torso'], (hx, hy), int(5 * sc))
-    pygame.draw.circle(surf, st['accent'], (hx + int(fx * 3), hy), 2)
-    # tail
-    pygame.draw.line(surf, st['body'], (bx - int(fx * bl // 2), by - 4),
-                     (bx - int(fx * (bl // 2 + 6)), by - 10), 2)
-
-
-def _draw_drone(surf, st, cx, foot, frame, sc):
-    hy = foot - int(34 * sc)
-    pygame.draw.ellipse(surf, st['torso'], (cx - 11, hy - 6, 22, 13))
-    pygame.draw.ellipse(surf, _shade(st['torso'], 0.7), (cx - 11, hy - 6, 22, 13), 1)
-    rot = frame % 2
-    for sx_ in (-13, 13):
-        pygame.draw.line(surf, (140, 146, 158), (cx + sx_ - 6 + rot * 3, hy - 8),
-                         (cx + sx_ + 6 - rot * 3, hy - 8), 2)
-        pygame.draw.line(surf, (90, 96, 108), (cx + sx_, hy - 8), (cx + sx_, hy - 4), 2)
-    pygame.draw.circle(surf, st['accent'], (cx, hy + 2), 3)
-
-
-# ------------------------------------------------------------ misc visuals ---
-
-def slash_arc(radius, color):
-    k = _key('slash', radius, color)
+# ================================================================= lighting
+def light_sprite(radius, color):
+    """Radial gradient for additive blending onto the lightmap (RGB only —
+    intensity is baked into the color, alpha is ignored by BLEND_RGB_ADD)."""
+    k = ('light', radius, color)
     if k in _cache:
         return _cache[k]
     d = radius * 2
-    surf = pygame.Surface((d, d), pygame.SRCALPHA)
-    rect = surf.get_rect()
-    for i, (w_, a) in enumerate([(6, 70), (3, 160)]):
-        pygame.draw.arc(surf, (*color, a), rect.inflate(-i * 6, -i * 6), -0.7, 0.7, w_)
-    _cache[k] = (surf, (radius, radius))
-    return _cache[k]
+    surf = pygame.Surface((d, d))
+    steps = 12
+    for i in range(steps, 0, -1):
+        f = i / steps                       # 1 at rim, 1/steps at core
+        inten = ((steps - i + 1) / steps) ** 1.8
+        c = (min(255, int(color[0] * inten)), min(255, int(color[1] * inten)),
+             min(255, int(color[2] * inten)))
+        pygame.draw.circle(surf, c, (radius, radius), int(radius * f))
+    _cache[k] = surf
+    return surf
 
 
 def vignette():
-    k = _key('vignette')
+    k = ('vignette',)
     if k in _cache:
         return _cache[k]
     from src.constants import WIDTH, HEIGHT
     surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-    for i in range(80):
-        a = int(i * 1.1)
-        pygame.draw.rect(surf, (0, 0, 5, a), (i * 4 - 320, i * 3 - 240, WIDTH - i * 8 + 640, HEIGHT - i * 6 + 480), 6)
-    surf.fill((0, 0, 0, 0))
-    # simpler: radial-ish darkening via corner rects
-    import math as _m
     cx, cy = WIDTH / 2, HEIGHT / 2
-    step = 16
+    step = 8
+    maxd = math.hypot(cx, cy)
     for x in range(0, WIDTH, step):
         for y in range(0, HEIGHT, step):
-            d = _m.hypot(x - cx, y - cy) / _m.hypot(cx, cy)
+            d = math.hypot(x - cx, y - cy) / maxd
             if d > 0.55:
-                a = min(150, int((d - 0.55) * 260))
-                pygame.draw.rect(surf, (4, 5, 10, a), (x, y, step, step))
+                a = min(120, int((d - 0.55) * 230))
+                pygame.draw.rect(surf, (3, 4, 9, a), (x, y, step, step))
     _cache[k] = surf
     return surf

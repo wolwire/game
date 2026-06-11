@@ -19,8 +19,11 @@ from src.enemy import Enemy
 from src.boss import Boss
 from src.camera import Camera
 from src.particles import Particles
+from src.lighting import Lighting
 from src import ui
-from src.entity import dist, Projectile
+from src import puppet
+from src.weapons import WEAPONS, draw_trail
+from src.entity import dist
 from data import story
 
 
@@ -32,12 +35,15 @@ class Game:
         self.state = 'title'
         self.t = 0.0
         self.state_t = 0.0
+        self.freeze_t = 0.0          # hit-stop
 
         self.world = World()
         self.player = Player(*self.world.spawn)
         self.camera = Camera(self.player.x, self.player.y)
         self.particles = Particles()
+        self.lighting = Lighting()
         self.vignette = assets.vignette()
+        self.chunks = {}
         ui.build_minimap(self.world)
 
         self.enemies = []
@@ -55,18 +61,17 @@ class Game:
         self.gate_open = False
         self.set_gate(False)
 
-        self.echo = None              # (x, y, shards) dropped on death
+        self.echo = None
         self.area = district_at(int(self.player.x), int(self.player.y))
         self.banner = (story.AREA_NAMES.get(self.area, ''), story.AREA_DESC.get(self.area, ''))
         self.banner_t = 0.0
         self.flash_msg = None
         self.flash_t = 0.0
 
-        # state payloads
         self.text_lines = []
         self.text_title = None
         self.text_next = 'playing'
-        self.dialogue = None          # (name, pages, page_idx)
+        self.dialogue = None
         self.npc_progress = {}
         self.beacon_sel = 0
         self.beacon_msg = ''
@@ -91,6 +96,9 @@ class Game:
     def set_state(self, s):
         self.state = s
         self.state_t = 0.0
+
+    def hitstop(self, t=0.05):
+        self.freeze_t = max(self.freeze_t, t)
 
     # ------------------------------------------------------------ events ---
     def handle_events(self):
@@ -132,6 +140,8 @@ class Game:
                     self.player.try_parry()
                 elif k == pygame.K_q:
                     self.player.try_stim()
+                elif k == pygame.K_r:
+                    self.player.cycle_weapon()
                 elif k == pygame.K_TAB:
                     self.cycle_lock()
                 elif k == pygame.K_m:
@@ -144,9 +154,7 @@ class Game:
                 if k in (pygame.K_m, pygame.K_ESCAPE):
                     self.set_state('playing')
             elif self.state == 'pause':
-                if k == pygame.K_ESCAPE:
-                    self.set_state('playing')
-                elif k == pygame.K_RETURN:
+                if k in (pygame.K_ESCAPE, pygame.K_RETURN):
                     self.set_state('playing')
                 elif k == pygame.K_q:
                     pygame.quit()
@@ -187,10 +195,10 @@ class Game:
     # ------------------------------------------------------- interactions ---
     def nearest_interactable(self):
         px, py = self.player.x, self.player.y
-        best, best_d = None, 1.5
+        best, best_d = None, 2.4
         for bx, by, name in self.world.beacons:
             d = dist(px, py, bx, by)
-            if d < best_d:
+            if d < best_d + 0.6:
                 best, best_d = ('beacon', (bx, by, name)), d
         for (x, y, key, style) in self.world.npcs:
             d = dist(px, py, x, y)
@@ -203,6 +211,14 @@ class Game:
             d = dist(px, py, x, y)
             if d < best_d:
                 best, best_d = ('lore', item), d
+        for item in self.world.weapons:
+            d = dist(px, py, item[0], item[1])
+            if d < best_d:
+                best, best_d = ('weapon', item), d
+        for item in self.world.caches:
+            d = dist(px, py, item[0], item[1])
+            if d < best_d:
+                best, best_d = ('cache', item), d
         if self.echo:
             d = dist(px, py, self.echo[0], self.echo[1])
             if d < best_d:
@@ -218,7 +234,7 @@ class Game:
             bx, by, name = data
             self.last_beacon = (bx, by)
             self.player.rest()
-            self.spawn_enemies()      # resting revives the city
+            self.spawn_enemies()
             self.projectiles.clear()
             self.reset_bosses()
             self.beacon_sel = 0
@@ -241,6 +257,28 @@ class Game:
             self.text_next = 'playing'
             self.set_state('text')
             self.player.shards += 25
+        elif kind == 'weapon':
+            x, y, wkey = data
+            self.world.weapons.remove(data)
+            self.player.give_weapon(wkey)
+            w = WEAPONS[wkey]
+            self.flash(f"{w['name']} acquired — {w['desc']}", 4.0)
+            self.particles.parry_spark(x, y)
+        elif kind == 'cache':
+            x, y, ckind, amount = data
+            self.world.caches.remove(data)
+            if ckind == 'shards':
+                self.player.shards += amount
+                self.flash(f"Supply cache: +{amount} shards")
+            elif ckind == 'stim':
+                self.player.stim_max += 1
+                self.player.stims = self.player.stim_max
+                self.flash("Field med kit: +1 stim capacity, refilled")
+            else:
+                self.player.bonus_hp += amount
+                self.player.hp += amount
+                self.flash(f"Memory anchor: +{amount} max HP")
+            self.particles.death_burst(x, y)
         elif kind == 'echo':
             self.player.shards += self.echo[2]
             self.particles.death_burst(self.echo[0], self.echo[1])
@@ -267,7 +305,7 @@ class Game:
 
     def cycle_lock(self):
         p = self.player
-        targets = [e for e in self.enemies if e.alive and dist(p.x, p.y, e.x, e.y) < 11]
+        targets = [e for e in self.enemies if e.alive and dist(p.x, p.y, e.x, e.y) < 22]
         if self.active_boss and self.active_boss.alive:
             targets.append(self.active_boss)
         targets.sort(key=lambda e: dist(p.x, p.y, e.x, e.y))
@@ -303,7 +341,7 @@ class Game:
             if key in self.bosses_defeated or not boss.alive:
                 continue
             bd = self.world.bosses[key]
-            if dist(p.x, p.y, *bd['center']) < bd['radius'] - 1.0:
+            if dist(p.x, p.y, *bd['center']) < bd['radius'] - 2.0:
                 self.pending_boss = key
                 self.set_state('boss_intro')
                 return
@@ -324,6 +362,10 @@ class Game:
         self.flash(data['defeat'], 5.0)
         self.camera.shake(10, 0.5)
         self.active_boss = None
+        if key == 'warden' and self.player.give_weapon('baton'):
+            self.flash(data['defeat'] + "  [Warden's Baton acquired]", 6.0)
+        if key == 'chorister' and self.player.give_weapon('choirblade'):
+            self.flash(data['defeat'] + "  [Choir Blade acquired]", 6.0)
         if key == 'archivist':
             self.text_lines = story.VICTORY_ARCHIVIST + [""] + story.ENDING_CHOICE
             self.text_title = "THE TOP FLOOR"
@@ -337,8 +379,11 @@ class Game:
     def update(self, dt):
         self.t += dt
         self.state_t += dt
-        self.particles.update(dt)
         self.flash_t = max(0, self.flash_t - dt)
+        if self.freeze_t > 0:
+            self.freeze_t -= dt
+            return
+        self.particles.update(dt)
         if self.state != 'playing':
             return
         p = self.player
@@ -348,7 +393,6 @@ class Game:
         my = (keys[pygame.K_s] - keys[pygame.K_w])
         p.update(dt, self.world, (mx, my), keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
 
-        # area banner
         area = district_at(int(p.x), int(p.y))
         if area != self.area:
             self.area = area
@@ -356,25 +400,21 @@ class Game:
             self.banner_t = 0.0
         self.banner_t = min(1.0, self.banner_t + dt / 4.5)
 
-        # gate bump message
         if not self.gate_open:
-            for (gx, gy) in self.world.gate_tiles[::4]:
-                if dist(p.x, p.y, gx + 0.5, gy + 0.5) < 2.2 and self.flash_t <= 0:
+            for (gx, gy) in self.world.gate_tiles[::6]:
+                if dist(p.x, p.y, gx + 0.5, gy + 0.5) < 4.0 and self.flash_t <= 0:
                     need = [k for k in ('warden', 'chorister') if k not in self.bosses_defeated]
                     names = ' and '.join(story.BOSS_DATA[k]['name'] for k in need)
                     self.flash(f"The Lattice denies you. It still grieves: {names}.", 3.5)
 
-        # enemies
         for e in self.enemies:
-            if e.alive and dist(p.x, p.y, e.x, e.y) < 30:
+            if e.alive and dist(p.x, p.y, e.x, e.y) < 55:
                 e.update(dt, self.world, p, self.projectiles, self.particles)
 
-        # bosses
         self.check_boss_triggers()
         if self.active_boss:
             boss = self.active_boss
             boss.update(dt, self.world, p, self.projectiles, self.particles, self.enemies)
-            # confine player to arena during the fight
             key = self.pending_boss
             bd = self.world.bosses[key]
             d = dist(p.x, p.y, *bd['center'])
@@ -386,13 +426,14 @@ class Game:
             if not boss.alive:
                 self.on_boss_death(key)
 
-        # player attacks
+        # player attack resolution
         if p.attack_active():
-            p.attack_hit_done = True
+            w = p.weapon
             hit_any = False
             for e in self.enemies:
                 if e.alive and p.in_arc(e.x, e.y, e.radius):
-                    gained = e.take_damage(p.attack_damage(), p.x, p.y, self.particles)
+                    gained = e.take_damage(p.attack_damage(), p.x, p.y,
+                                           self.particles, w['stagger'])
                     hit_any = True
                     if gained:
                         p.shards += gained
@@ -400,12 +441,13 @@ class Game:
                         self.flash(f"+{gained} shards", 1.2)
             b = self.active_boss
             if b and b.alive and p.in_arc(b.x, b.y, b.radius):
-                b.take_damage(p.attack_damage(), p.x, p.y, self.particles)
+                b.take_damage(p.attack_damage(), p.x, p.y, self.particles, w['stagger'])
                 hit_any = True
             if hit_any:
-                self.camera.shake(3, 0.1)
+                p.atk_hit_done = True
+                self.camera.shake(3 if not p.atk_heavy else 6, 0.12)
+                self.hitstop(0.045 if not p.atk_heavy else 0.075)
 
-        # projectiles
         for pr in self.projectiles[:]:
             if not pr.update(dt, self.world):
                 self.projectiles.remove(pr)
@@ -417,16 +459,14 @@ class Game:
                     if res == 'hit':
                         self.particles.blood(p.x, p.y)
 
-        # shard echo proximity sparkle
         if self.echo:
             self.particles.shard_sparkle(self.echo[0], self.echo[1])
         for bx, by, _ in self.world.beacons:
-            if dist(p.x, p.y, bx, by) < 14:
+            if dist(p.x, p.y, bx, by) < 28:
                 self.particles.beacon_idle(bx, by)
 
         self.camera.follow(p.x, p.y, dt)
 
-        # death
         if not p.alive and self.state == 'playing':
             self.echo = (p.x, p.y, p.shards) if p.shards > 0 else self.echo
             p.shards = 0
@@ -446,16 +486,18 @@ class Game:
         s = self.screen
         if self.state == 'title':
             ui.draw_title(s, self.t)
+            self.particles.update(0)
+            self.particles.draw_rain(s)
             pygame.display.flip()
             return
         s.fill(C_BG)
         ox, oy = self.camera.offset()
         self.draw_world(s, ox, oy)
         self.particles.draw_world(s, ox, oy)
+        self.lighting.apply(s)
         self.particles.draw_rain(s)
         s.blit(self.vignette, (0, 0))
 
-        # HUD layer
         p = self.player
         if self.state in ('playing', 'dialogue', 'boss_intro', 'beacon', 'dead'):
             ui.draw_hud(s, p, story.AREA_NAMES.get(self.area, ''))
@@ -465,7 +507,7 @@ class Game:
                 ui.draw_boss_bar(s, self.active_boss,
                                  story.BOSS_DATA[self.pending_boss]['name'])
             if p.lock_target is not None and getattr(p.lock_target, 'alive', False):
-                tx, ty = world_to_screen(p.lock_target.x, p.lock_target.y, 30)
+                tx, ty = world_to_screen(p.lock_target.x, p.lock_target.y, 52)
                 ui.draw_lock_marker(s, tx + ox, ty + oy, self.t)
             if p.parry_success_t > 0:
                 ui.draw_center_flash(s, "PARRY!", C_ACCENT)
@@ -478,6 +520,8 @@ class Game:
                     labels = {'beacon': "E — rest at the relay beacon",
                               'npc': "E — talk",
                               'lore': "E — read",
+                              'weapon': "E — take the weapon",
+                              'cache': "E — open the cache",
                               'echo': "E — reclaim your shards"}
                     ui.draw_prompt(s, labels[it[0]])
 
@@ -505,9 +549,9 @@ class Game:
             ui.draw_death(s, self.death_msg, self.state_t)
         elif self.state == 'pause':
             ui.overlay(s, 170)
-            ui.text(s, "PAUSED", WIDTH // 2, 240, ui.F_BIG, C_TEXT, center=True)
+            ui.text(s, "PAUSED", WIDTH // 2, 200, ui.F_BIG, C_TEXT, center=True)
             for i, line in enumerate(story.CONTROLS):
-                ui.text(s, line, WIDTH // 2, 300 + i * 24, ui.F_SMALL, C_TEXT_DIM, center=True)
+                ui.text(s, line, WIDTH // 2, 260 + i * 24, ui.F_SMALL, C_TEXT_DIM, center=True)
             ui.text(s, "ESC — resume    Q — quit", WIDTH // 2, HEIGHT - 80,
                     ui.F_MED, C_ACCENT, center=True)
         elif self.state == 'ending_choice':
@@ -515,159 +559,197 @@ class Game:
 
         pygame.display.flip()
 
+    # ---------------------------------------------------------- world draw ---
+    def get_chunk(self, ccx, ccy):
+        ch = self.chunks.get((ccx, ccy))
+        if ch is None:
+            ch = assets.render_chunk(self.world, ccx, ccy)
+            self.chunks[(ccx, ccy)] = ch
+        return ch
+
     def draw_world(self, s, ox, oy):
         w = self.world
-        # visible world-rect from screen corners
         corners = [screen_to_world(-ox + cx, -oy + cy)
                    for cx, cy in ((0, 0), (WIDTH, 0), (0, HEIGHT), (WIDTH, HEIGHT))]
         x0 = max(0, int(min(c[0] for c in corners)) - 2)
         x1 = min(w.w, int(max(c[0] for c in corners)) + 3)
         y0 = max(0, int(min(c[1] for c in corners)) - 2)
-        y1 = min(w.h, int(max(c[1] for c in corners)) + 9)
+        y1 = min(w.h, int(max(c[1] for c in corners)) + 14)
 
-        # ground pass
-        wave = self.t * 1.5
-        for ty in range(y0, y1):
-            row = w.ground[ty]
-            for tx in range(x0, x1):
-                sx, sy = world_to_screen(tx, ty)
-                sx += ox
-                sy += oy
-                if sx < -TILE_W or sx > WIDTH or sy < -TILE_H or sy > HEIGHT + TILE_H:
-                    continue
-                kind = row[tx]
-                variant = (tx * 7 + ty * 13) % 4
-                if kind == 'water':
-                    variant = int(wave + (tx + ty) * 0.5) % 4
-                img, (ax, ay) = assets.ground_tile(kind, variant)
-                s.blit(img, (sx, sy))
-                dec = w.decals.get((tx, ty))
-                if dec:
-                    dimg, _ = assets.road_marking(dec)
-                    s.blit(dimg, (sx, sy))
+        # ground chunks
+        for ccy in range(y0 // CHUNK, (y1 - 1) // CHUNK + 1):
+            for ccx in range(x0 // CHUNK, (x1 - 1) // CHUNK + 1):
+                surf, (ax, ay) = self.get_chunk(ccx, ccy)
+                sx, sy = world_to_screen(ccx * CHUNK, ccy * CHUNK)
+                s.blit(surf, (sx + ox - ax, sy + oy - ay))
 
-        # boss telegraphs (flat on ground)
+        self.particles.draw_decals(s, ox, oy)
+
+        # telegraphs
         if self.active_boss:
             for tg in self.active_boss.telegraphs:
                 sx, sy = world_to_screen(tg.x, tg.y)
                 frac = 1.0 - tg.t / tg.total
-                rw, rh = tg.r * TILE_W, tg.r * TILE_H
+                rw, rh = tg.r * HALF_W, tg.r * HALF_H
                 rect = pygame.Rect(sx + ox - rw, sy + oy - rh, rw * 2, rh * 2)
                 surf_tg = pygame.Surface(rect.size, pygame.SRCALPHA)
-                pygame.draw.ellipse(surf_tg, (255, 60, 50, 40 + int(60 * frac)),
+                pygame.draw.ellipse(surf_tg, (255, 60, 50, 36 + int(56 * frac)),
                                     surf_tg.get_rect())
                 pygame.draw.ellipse(surf_tg, (255, 80, 60, 180), surf_tg.get_rect(), 2)
+                inner = surf_tg.get_rect().inflate(-rect.w * (1 - frac), -rect.h * (1 - frac))
+                pygame.draw.ellipse(surf_tg, (255, 120, 80, 90), inner, 2)
                 s.blit(surf_tg, rect.topleft)
 
-        # depth-sorted entity pass
-        drawables = []   # (depth, surf, x, y)
+        # ---- depth-sorted entities ----
+        drawables = []   # (depth, kind, payload)
+        p = self.player
+        px, py = p.x, p.y
+        view = 46
+        lt = self.lighting
 
-        def add(img_anchor, wx, wy, z=0.0, depth_bias=0.0):
+        def add_sprite(img_anchor, wx, wy, z=0.0, bias=0.0):
             img, (ax, ay) = img_anchor
             sx, sy = world_to_screen(wx, wy, z)
-            drawables.append((wx + wy + depth_bias, img, sx + ox - ax, sy + oy - ay))
+            drawables.append((wx + wy + bias, 'blit', (img, sx + ox - ax, sy + oy - ay)))
 
-        px, py = self.player.x, self.player.y
-        view_r = 26
         for b in w.buildings:
-            if abs(b.x - px) < view_r + b.fw and abs(b.y - py) < view_r + b.fh:
-                add(assets.building(b.seed, b.fw, b.fh, b.stories, b.style),
-                    b.x, b.y, depth_bias=b.fw + b.fh - 1)
+            if abs(b.x - px) < view + b.fw and abs(b.y - py) < view + b.fh:
+                add_sprite(assets.building(b.seed, b.fw, b.fh, b.stories, b.style),
+                           b.x, b.y, bias=b.fw + b.fh - 1)
         for pr in w.props:
-            if abs(pr.x - px) < view_r and abs(pr.y - py) < view_r:
+            if abs(pr.x - px) < view and abs(pr.y - py) < view:
                 if pr.kind == 'car':
-                    add(assets.car(pr.seed, pr.axis), pr.x, pr.y)
+                    add_sprite(assets.car(pr.seed, pr.axis), pr.x, pr.y,
+                               bias=0.6 if pr.axis == 'x' else 0.6)
                 else:
-                    add(assets.prop(pr.kind, pr.variant), pr.x, pr.y)
+                    add_sprite(assets.prop(pr.kind, pr.variant), pr.x, pr.y)
         for bx, by, name in w.beacons:
-            if abs(bx - px) < view_r and abs(by - py) < view_r:
-                add(assets.prop('beacon'), bx, by)
+            if abs(bx - px) < view and abs(by - py) < view:
+                add_sprite(assets.prop('beacon'), bx, by)
+                lt.add_world(ox, oy, bx, by, 40, 240, (44, 96, 120))
         for (x, y, idx) in w.lore:
-            if idx not in self.lore_found and abs(x - px) < view_r and abs(y - py) < view_r:
-                add(assets.prop('lore'), x, y)
-        if self.echo and abs(self.echo[0] - px) < view_r and abs(self.echo[1] - py) < view_r:
-            add(assets.prop('shard_echo'), self.echo[0], self.echo[1])
+            if idx not in self.lore_found and abs(x - px) < view and abs(y - py) < view:
+                add_sprite(assets.prop('lore'), x, y)
+                lt.add_world(ox, oy, x, y, 8, 50, (60, 50, 24))
+        for item in w.weapons:
+            x, y, wkey = item
+            if abs(x - px) < view and abs(y - py) < view:
+                add_sprite(assets.prop('weapon_pickup'), x, y)
+                lt.add_world(ox, oy, x, y, 8, 60, (30, 55, 70))
+        for item in w.caches:
+            x, y = item[0], item[1]
+            if abs(x - px) < view and abs(y - py) < view:
+                add_sprite(assets.prop('cache'), x, y)
+                lt.add_world(ox, oy, x, y, 8, 55, (60, 44, 20))
+        if self.echo and abs(self.echo[0] - px) < view and abs(self.echo[1] - py) < view:
+            add_sprite(assets.prop('shard_echo'), self.echo[0], self.echo[1])
+            lt.add_world(ox, oy, self.echo[0], self.echo[1], 10, 70, (40, 60, 80))
+
         for (x, y, key, style) in w.npcs:
-            if abs(x - px) < view_r and abs(y - py) < view_r:
-                add(assets.character(style, 2, 0), x, y)
+            if abs(x - px) < view and abs(y - py) < view:
+                drawables.append((x + y, 'npc', (x, y, style)))
         for e in self.enemies:
-            if e.alive and abs(e.x - px) < view_r and abs(e.y - py) < view_r:
-                img, anchor = assets.character(e.style, e.octant(), e.anim_frame())
-                if e.hit_flash > 0:
-                    img = img.copy()
-                    img.fill((90, 30, 30, 0), special_flags=pygame.BLEND_RGBA_ADD)
-                add((img, anchor), e.x, e.y)
+            if e.alive and abs(e.x - px) < view and abs(e.y - py) < view:
+                drawables.append((e.x + e.y, 'enemy', e))
         for key, boss in self.bosses.items():
-            if boss.alive and abs(boss.x - px) < view_r and abs(boss.y - py) < view_r:
-                img, anchor = assets.character(boss.style, boss.octant(), boss.anim_frame())
-                if boss.hit_flash > 0:
-                    img = img.copy()
-                    img.fill((90, 30, 30, 0), special_flags=pygame.BLEND_RGBA_ADD)
-                add((img, anchor), boss.x, boss.y)
-
-        # player (with roll tilt + attack slash)
-        p = self.player
+            if boss.alive and abs(boss.x - px) < view and abs(boss.y - py) < view:
+                drawables.append((boss.x + boss.y, 'boss', boss))
         if p.alive or self.state == 'dead':
-            img, anchor = assets.character('player', p.octant(), p.anim_frame())
-            if p.state == 'roll':
-                img = pygame.transform.rotate(img, 28 if p.roll_dx - p.roll_dy > 0 else -28)
-                anchor = (img.get_width() // 2, img.get_height() - 6)
-            if p.state == 'stim':
-                img = img.copy()
-                img.fill((20, 60, 20, 0), special_flags=pygame.BLEND_RGBA_ADD)
-            if p.hit_iframes > 0 and int(self.t * 20) % 2 == 0:
-                img = img.copy()
-                img.set_alpha(120)
-            add((img, anchor), p.x, p.y)
-
-        # projectiles
+            drawables.append((p.x + p.y, 'player', p))
         for pr in self.projectiles:
-            sx, sy = world_to_screen(pr.x, pr.y, 22)
-            drawables.append((pr.x + pr.y, None, sx + ox, sy + oy, pr.color))
+            drawables.append((pr.x + pr.y, 'proj', pr))
+            lt.add_world(ox, oy, pr.x, pr.y, 22, 46,
+                         (pr.color[0] // 5, pr.color[1] // 5, pr.color[2] // 5))
 
         drawables.sort(key=lambda d: d[0])
-        for d in drawables:
-            if d[1] is None:
-                _, _, sx, sy, color = d
-                pygame.draw.circle(s, color, (int(sx), int(sy)), 5)
-                pygame.draw.circle(s, (255, 255, 255), (int(sx), int(sy)), 2)
-            else:
-                s.blit(d[1], (d[2], d[3]))
+        for depth, kind, payload in drawables:
+            if kind == 'blit':
+                img, sx, sy = payload
+                s.blit(img, (sx, sy))
+            elif kind == 'npc':
+                x, y, style = payload
+                puppet.draw(s, ox, oy, x, y, 0.5, 0.5, style, 'idle', self.t)
+            elif kind == 'enemy':
+                e = payload
+                if e.kind == 'feral':
+                    puppet.draw_dog(s, ox, oy, e.x, e.y, e.fx, e.fy, e.anim(),
+                                    e.anim_t, e.hit_flash)
+                elif e.kind == 'drone':
+                    puppet.draw_drone(s, ox, oy, e.x, e.y, e.anim_t, e.hit_flash,
+                                      firing=e.state == 'windup')
+                else:
+                    wkey = e.weapon_key
+                    puppet.draw(s, ox, oy, e.x, e.y, e.fx, e.fy, e.style, e.anim(),
+                                e.anim_t, WEAPONS[wkey] if wkey else None,
+                                e.attack_info(), flash=e.hit_flash * 3)
+            elif kind == 'boss':
+                b = payload
+                if b.kind == 'hound':
+                    puppet.draw_dog(s, ox, oy, b.x, b.y, b.fx, b.fy, b.anim(),
+                                    b.anim_t, b.hit_flash, scale=1.8, accent=(255, 60, 60))
+                else:
+                    wkey = b.weapon_key
+                    puppet.draw(s, ox, oy, b.x, b.y, b.fx, b.fy, b.style, b.anim(),
+                                b.anim_t, WEAPONS[wkey] if wkey else None,
+                                b.attack_info(), flash=b.hit_flash * 3)
+                if b.kind in ('chorister', 'archivist'):
+                    col = (40, 26, 56) if b.kind == 'chorister' else (24, 46, 60)
+                    lt.add_world(ox, oy, b.x, b.y, 30, 120, col)
+            elif kind == 'player':
+                self.draw_player(s, ox, oy)
+            elif kind == 'proj':
+                pr = payload
+                sx, sy = world_to_screen(pr.x, pr.y, 22)
+                pygame.draw.circle(s, pr.color, (int(sx + ox), int(sy + oy)), 5)
+                pygame.draw.circle(s, (255, 255, 255), (int(sx + ox), int(sy + oy)), 2)
 
-        # attack slash arc on top
-        if p.attack_active() or (p.state in ('attack', 'heavy') and p.attack_hit_done
-                                 and p.timer > (LIGHT_RECOVER if p.state == 'attack'
-                                                else HEAVY_RECOVER) - 0.12):
-            sx, sy = world_to_screen(p.x + p.fx * 0.9, p.y + p.fy * 0.9, 24)
-            ang = math.atan2(-(p.fx + p.fy) * 0.5, (p.fx - p.fy))
-            color = C_ACCENT if p.state == 'attack' else C_ACCENT2
-            img, (ax, ay) = assets.slash_arc(34, color)
-            img = pygame.transform.rotate(img, math.degrees(ang))
-            r = img.get_rect(center=(sx + ox, sy + oy))
-            s.blit(img, r)
+        # weapon trail on top of everything in world space
+        if p.trail:
+            draw_trail(s, p.trail, p.weapon['trail'])
 
         # parry shimmer
         if p.parry_active > 0:
-            sx, sy = world_to_screen(p.x + p.fx * 0.5, p.y + p.fy * 0.5, 26)
-            pygame.draw.circle(s, C_ACCENT, (int(sx + ox), int(sy + oy)), 14, 2)
+            sx, sy = world_to_screen(p.x + p.fx * 0.9, p.y + p.fy * 0.9, 26)
+            pygame.draw.circle(s, C_ACCENT, (int(sx + ox), int(sy + oy)), 13, 2)
 
         # fog gate
         if not self.gate_open:
-            for (gx, gy) in w.gate_tiles:
+            gxs = [g for g in w.gate_tiles if g[1] == 66]
+            for (gx, gy) in gxs:
                 sx, sy = world_to_screen(gx, gy)
                 sx += ox
                 sy += oy
-                if -TILE_W < sx < WIDTH and -100 < sy < HEIGHT + 60:
-                    hgt = 70
+                if -TILE_W < sx < WIDTH and -120 < sy < HEIGHT + 60:
+                    hgt = 64
                     fog = pygame.Surface((TILE_W, TILE_H + hgt), pygame.SRCALPHA)
-                    pulse = 30 + int(20 * math.sin(self.t * 2 + gx))
-                    pts = assets.diamond_points(0, hgt)
+                    pulse = 26 + int(16 * math.sin(self.t * 2 + gx * 0.4))
+                    pts = assets.diamond(0, hgt)
                     pygame.draw.polygon(fog, (90, 200, 255, pulse),
                                         [(pts[3][0], pts[3][1] - hgt), (pts[1][0], pts[1][1] - hgt),
                                          pts[1], pts[3]])
-                    pygame.draw.line(fog, (140, 230, 255, 90),
+                    pygame.draw.line(fog, (140, 230, 255, 80),
                                      (pts[3][0], pts[3][1] - hgt), (pts[1][0], pts[1][1] - hgt), 2)
-                    s.blit(fog, (sx, sy - hgt + 0))
+                    s.blit(fog, (sx, sy - hgt))
+
+        # ---- lights ----
+        for (lx, ly, lz, lrad, lcol) in w.lights:
+            lt.add_world(ox, oy, lx, ly, lz, lrad, lcol)
+        # the player carries a faint cold light so they always read
+        lt.add_world(ox, oy, p.x, p.y, 20, 190, (48, 54, 68))
+        if p.state == 'attack' and p.trail:
+            tx, ty, _ = p.trail[-1]
+            lt.add(tx, ty, 60, tuple(c // 5 for c in p.weapon['trail']))
+        # lit building windows pool a little light at street level — skipped
+        # for performance; shop neon + lampposts come from world.lights.
+
+    def draw_player(self, s, ox, oy):
+        p = self.player
+        flicker = p.hit_iframes > 0 and int(self.t * 20) % 2 == 0
+        if flicker:
+            return
+        puppet.draw(s, ox, oy, p.x, p.y, p.fx, p.fy, 'player', p.anim(),
+                    p.anim_time(), p.weapon, p.attack_info(),
+                    trail=p.trail, flash=0.0)
 
     # -------------------------------------------------------------- run ---
     def run(self):

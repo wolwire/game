@@ -1,74 +1,71 @@
-"""Global constants: screen, isometric grid, balance numbers, palette."""
+"""Global constants. World units are *fine* tiles: 32x16 px diamonds.
+The player stands ~1.5 tiles wide — scenery is built from small tiles."""
 
 WIDTH, HEIGHT = 1280, 720
 FPS = 60
 
-# Isometric tile metrics (2:1 diamond)
-TILE_W = 64
-TILE_H = 32
+# Fine isometric tile metrics (2:1 diamond)
+TILE_W = 32
+TILE_H = 16
 HALF_W = TILE_W // 2
 HALF_H = TILE_H // 2
 
-# World size in tiles (open world)
-WORLD_W = 120
-WORLD_H = 120
+# World size in fine tiles
+WORLD_W = 240
+WORLD_H = 240
 
-# --- Player balance ---
+# Ground chunk pre-render (tiles per chunk side)
+CHUNK = 16
+
+# --- Player balance (distances in fine tiles: ~2x the old coarse units) ---
 PLAYER_BASE_HP = 100
 PLAYER_BASE_STAMINA = 100
-PLAYER_SPEED = 3.4          # tiles / second
+PLAYER_SPEED = 7.0
 PLAYER_SPRINT_MULT = 1.6
-ROLL_SPEED = 7.5
-ROLL_TIME = 0.38
-ROLL_IFRAMES = 0.28
-ROLL_COST = 22
-SPRINT_DRAIN = 14           # stamina / second
-STAMINA_REGEN = 32          # stamina / second
-STAMINA_REGEN_DELAY = 0.55
+ROLL_SPEED = 15.0
+ROLL_TIME = 0.40
+ROLL_IFRAMES = 0.30
+ROLL_COST = 20
+SPRINT_DRAIN = 13
+STAMINA_REGEN = 34
+STAMINA_REGEN_DELAY = 0.5
 
-LIGHT_DMG = 22
-LIGHT_COST = 16
-LIGHT_RECOVER = 0.34
-HEAVY_DMG = 48
-HEAVY_COST = 30
-HEAVY_WINDUP = 0.42
-HEAVY_RECOVER = 0.55
-ATTACK_RANGE = 1.45         # tiles
-ATTACK_ARC = 1.9            # radians
+COMBO_WINDOW = 0.45      # seconds after recover start to chain the next hit
 
 PARRY_WINDOW = 0.22
-PARRY_RECOVER = 0.6
+PARRY_RECOVER = 0.55
 RIPOSTE_MULT = 2.6
 
 STIM_HEAL = 65
 STIM_CHARGES = 3
-STIM_TIME = 0.85
+STIM_TIME = 0.9
 
-INVULN_AFTER_HIT = 0.5
+INVULN_AFTER_HIT = 0.55
 
-# Leveling (souls-like): cost grows per level
 def level_cost(level):
     return int(80 + (level ** 1.9) * 14)
 
-VIGOR_HP = 14               # hp per point
-ENDURANCE_STAM = 9          # stamina per point
-STRENGTH_DMG = 0.07         # +7% damage per point
+VIGOR_HP = 14
+ENDURANCE_STAM = 9
+STRENGTH_DMG = 0.07
 
-# --- Camera ---
-CAM_LERP = 6.0
+CAM_LERP = 6.5
 
-# --- Palette (modern, overcast, desaturated with neon accents) ---
-C_BG = (14, 15, 19)
-C_UI_BG = (10, 11, 14, 200)
-C_TEXT = (222, 224, 228)
-C_TEXT_DIM = (140, 144, 152)
-C_ACCENT = (87, 199, 255)       # signal blue
-C_ACCENT2 = (255, 170, 64)      # sodium-lamp amber
-C_HP = (196, 50, 56)
+# --- Palette ---
+C_BG = (13, 14, 18)
+C_TEXT = (224, 226, 230)
+C_TEXT_DIM = (138, 142, 150)
+C_ACCENT = (97, 203, 255)
+C_ACCENT2 = (255, 176, 72)
+C_HP = (198, 52, 58)
 C_HP_BG = (52, 18, 20)
-C_STAM = (96, 168, 80)
+C_STAM = (104, 172, 84)
 C_STAM_BG = (24, 40, 22)
-C_SHARD = (150, 210, 255)
-C_BOSS = (212, 168, 60)
-C_DANGER = (255, 70, 70)
-C_GRACE = (120, 220, 255)
+C_SHARD = (152, 212, 255)
+C_BOSS = (214, 170, 64)
+C_DANGER = (255, 72, 72)
+C_GRACE = (122, 222, 255)
+
+# --- Lighting ---
+LIGHT_SCALE = 3            # lightmap is screen/LIGHT_SCALE
+AMBIENT = (158, 164, 184)    # moonlit overcast ambient (multiplied)

@@ -37,19 +37,27 @@ def draw_hud(surf, player, area_name):
     bar(surf, 24, 44, 240 * (player.max_stamina / 200), 12,
         player.stamina / player.max_stamina, C_STAM, C_STAM_BG)
     # stims
-    for i in range(STIM_CHARGES):
+    for i in range(player.stim_max):
         col = C_ACCENT2 if i < player.stims else (50, 48, 44)
         pygame.draw.rect(surf, col, (24 + i * 22, 64, 16, 20), border_radius=4)
         pygame.draw.rect(surf, (20, 20, 22), (24 + i * 22, 64, 16, 20), 2, border_radius=4)
-    text(surf, 'Q', 24 + STIM_CHARGES * 22 + 6, 66, F_SMALL, C_TEXT_DIM)
+    text(surf, 'Q', 24 + player.stim_max * 22 + 6, 66, F_SMALL, C_TEXT_DIM)
     # shards
     pygame.draw.circle(surf, C_SHARD, (38, 106), 7)
     pygame.draw.circle(surf, (230, 245, 255), (38, 106), 3)
     text(surf, f"{player.shards}", 52, 96, F_MED, C_SHARD)
     text(surf, f"LV {player.level}", 52, 116, F_SMALL, C_TEXT_DIM)
+    # weapon slot
+    w = player.weapon
+    pygame.draw.rect(surf, (16, 18, 24, 200), (24, HEIGHT - 64, 230, 40), border_radius=6)
+    pygame.draw.rect(surf, (60, 68, 84), (24, HEIGHT - 64, 230, 40), 2, border_radius=6)
+    text(surf, w['name'], 38, HEIGHT - 58, F_MED, C_TEXT)
+    if len(player.inventory) > 1:
+        text(surf, f"[{player.weapon_idx + 1}/{len(player.inventory)}]  R — switch",
+             38, HEIGHT - 38, F_SMALL, C_TEXT_DIM)
+    else:
+        text(surf, w['desc'], 38, HEIGHT - 38, F_SMALL, C_TEXT_DIM)
     # area
-    text(surf, area_name, WIDTH - 24, 20, F_MED, C_TEXT_DIM, shadow=True,
-         center=False) if False else None
     img = F_MED.render(area_name, True, C_TEXT_DIM)
     surf.blit(img, (WIDTH - img.get_width() - 24, 20))
 
@@ -139,16 +147,17 @@ def draw_beacon_menu(surf, player, sel, message):
 MINIMAP_COLORS = {
     'asphalt': (50, 51, 56), 'road': (38, 39, 44), 'sidewalk': (88, 86, 84),
     'plaza': (84, 80, 88), 'grass': (52, 70, 44), 'dirt': (76, 64, 50),
-    'water': (28, 44, 60), 'sand': (110, 98, 78), 'rubble': (64, 60, 56),
+    'water': (28, 44, 60), 'sand': (110, 98, 78), 'alley': (44, 44, 48),
     'lot': (56, 54, 52),
 }
 
 _minimap_base = None
+MAP_SCALE = 2
 
 
 def build_minimap(world):
     global _minimap_base
-    scale = 3
+    scale = MAP_SCALE
     surf = pygame.Surface((world.w * scale, world.h * scale))
     for y in range(world.h):
         for x in range(world.w):
@@ -166,7 +175,7 @@ def build_minimap(world):
 def draw_map(surf, world, player, bosses_defeated):
     overlay(surf, 200)
     base = _minimap_base if _minimap_base is not None else build_minimap(world)
-    scale = 3
+    scale = MAP_SCALE
     mw, mh = base.get_size()
     mx, my = (WIDTH - mw) // 2, (HEIGHT - mh) // 2
     surf.blit(base, (mx, my))
@@ -216,7 +225,7 @@ def draw_title(surf, t):
          WIDTH // 2, 300, F_MED, C_TEXT_DIM, center=True)
     col = (int(120 + 100 * pulse),) * 3
     text(surf, "PRESS ENTER", WIDTH // 2, 480, F_MED, col, center=True)
-    text(surf, "a 2.5D isometric souls-like", WIDTH // 2, HEIGHT - 50, F_SMALL,
+    text(surf, "a 2.5D isometric souls-like — WASD move / J K attack / SPACE roll", WIDTH // 2, HEIGHT - 50, F_SMALL,
          (70, 74, 84), center=True)
 
 
