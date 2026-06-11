@@ -137,9 +137,9 @@ def paint_tile(surf, ox, oy, kind, wx, wy, world=None):
             pygame.draw.ellipse(surf, (172, 196, 220), (px + 2, py + 1, pw - 4, 2))
     elif kind in ('sidewalk', 'plaza'):
         if (wx + wy) % 2 == 0:
-            pygame.draw.line(surf, sh(base, 0.88), pts[0], pts[2])
+            pygame.draw.line(surf, sh(base, 0.94), pts[0], pts[2])
         else:
-            pygame.draw.line(surf, sh(base, 0.91), pts[3], pts[1])
+            pygame.draw.line(surf, sh(base, 0.96), pts[3], pts[1])
         if rng.random() < 0.05:
             pygame.draw.line(surf, sh(base, 0.7), (ox + 10, oy + 6),
                              (ox + 10 + rng.randint(4, 9), oy + 6 + rng.randint(-2, 3)))
@@ -236,195 +236,424 @@ def render_chunk(world, ccx, ccy):
 
 # ================================================================ buildings
 BUILDING_STYLES = {
-    'brick':      {'wall': (164, 102, 82),  'win': (104, 128, 156), 'lit': (146, 174, 198), 'trim': (120, 76, 62)},
-    'concrete':   {'wall': (178, 176, 178), 'win': (108, 132, 160), 'lit': (150, 178, 202), 'trim': (140, 138, 142)},
-    'glass':      {'wall': (118, 140, 162), 'win': (130, 162, 192), 'lit': (170, 200, 224), 'trim': (90, 108, 128)},
-    'shop':       {'wall': (172, 150, 158), 'win': (104, 128, 156), 'lit': (150, 176, 200), 'trim': (130, 110, 120)},
-    'industrial': {'wall': (160, 144, 116), 'win': (96, 116, 138), 'lit': (140, 162, 184), 'trim': (118, 106, 86)},
-    'house':      {'wall': (186, 152, 118), 'win': (106, 130, 158), 'lit': (152, 178, 202), 'trim': (140, 112, 88)},
-    'tower':      {'wall': (108, 126, 152), 'win': (140, 172, 204), 'lit': (184, 212, 234), 'trim': (84, 98, 120)},
+    # wall plaster/stone, window glass, trim stone, roof tiles, timber/detail
+    'brick':      {'wall': (172, 116, 88),  'win': (96, 120, 148),  'trim': (212, 196, 168),
+                   'roof': (164, 82, 56),  'timber': (118, 78, 58), 'masonry': 'brick'},
+    'concrete':   {'wall': (190, 184, 170), 'win': (104, 130, 158), 'trim': (216, 210, 196),
+                   'roof': (142, 130, 118), 'timber': (140, 132, 118), 'masonry': 'stone'},
+    'glass':      {'wall': (132, 152, 172), 'win': (138, 170, 200), 'trim': (170, 186, 202),
+                   'roof': (110, 124, 140), 'timber': (96, 110, 126), 'masonry': 'panel'},
+    'shop':       {'wall': (204, 176, 142), 'win': (98, 124, 152),  'trim': (228, 212, 184),
+                   'roof': (152, 74, 52),  'timber': (122, 86, 60), 'masonry': 'plaster'},
+    'industrial': {'wall': (176, 158, 124), 'win': (92, 112, 134),  'trim': (204, 190, 158),
+                   'roof': (124, 128, 134), 'timber': (110, 96, 72), 'masonry': 'stone'},
+    'house':      {'wall': (214, 192, 156), 'win': (100, 126, 154), 'trim': (230, 216, 188),
+                   'roof': (170, 88, 60),  'timber': (112, 82, 58), 'masonry': 'plaster'},
+    'tower':      {'wall': (124, 142, 164), 'win': (146, 178, 208), 'trim': (168, 184, 202),
+                   'roof': (96, 110, 128), 'timber': (90, 104, 122), 'masonry': 'panel'},
 }
-STORY_PX = 30
+STORY_PX = 26
+ROOF_H = 22
 
+BANNER_COLORS = [(64, 96, 170), (170, 64, 64), (74, 130, 74), (160, 120, 50), (110, 70, 140)]
+AWNING_COLORS = [(168, 60, 60), (60, 104, 150), (150, 118, 56), (84, 128, 84)]
 NEON_COLORS = [(255, 90, 120), (90, 220, 255), (255, 180, 70), (140, 255, 160), (200, 120, 255)]
-NEON_WORDS = [4, 5, 3, 6]
+
+
+def _w2px(wx, wy, z=0.0):
+    """Local world offset (tiles) -> local pixel offset."""
+    return (wx - wy) * HALF_W, (wx + wy) * HALF_H - z
+
+
+def _wall_face(surf, p0, p1, h, color, st, rng, stories, face_shade, win=True,
+               arcade=False):
+    """One wall face: top edge runs p0->p1 (both at wall-top height); the wall
+    extends down by h px. Painted with masonry, plinth, windows."""
+    axx, axy = p1[0] - p0[0], p1[1] - p0[1]
+    g0 = (p0[0], p0[1] + h)
+    g1 = (p1[0], p1[1] + h)
+    col = sh(color, face_shade)
+    pygame.draw.polygon(surf, col, [p0, p1, g1, g0])
+
+    # masonry coursing
+    kind = st['masonry']
+    course = 6 if kind == 'brick' else 8
+    line_c = sh(col, 0.88)
+    for cy in range(course, h - 3, course):
+        pygame.draw.line(surf, line_c, (p0[0], p0[1] + cy), (p1[0], p1[1] + cy), 1)
+        if kind in ('brick', 'stone'):
+            # staggered vertical joints
+            n = max(2, int(abs(axx) / 9))
+            off = (cy // course) % 2 * 0.5
+            for j in range(n):
+                t = (j + 0.5 + off) / n
+                if t >= 1:
+                    continue
+                jx = p0[0] + axx * t
+                jy = p0[1] + axy * t + cy
+                pygame.draw.line(surf, line_c, (jx, jy - course + 2), (jx, jy - 1), 1)
+    if kind == 'plaster':
+        # timber frame: corner posts + diagonal brace
+        tc = st['timber']
+        pygame.draw.line(surf, tc, (p0[0] + 1, p0[1]), (g0[0] + 1, g0[1]), 2)
+        pygame.draw.line(surf, tc, (p1[0] - 1, p1[1]), (g1[0] - 1, g1[1]), 2)
+        for s in range(stories):
+            yy = s * STORY_PX
+            pygame.draw.line(surf, tc, (p0[0], p0[1] + yy + STORY_PX - 1),
+                             (p1[0], p1[1] + yy + STORY_PX - 1), 2)
+    if kind == 'panel':
+        n = max(2, int(abs(axx) / 10))
+        for j in range(1, n):
+            t = j / n
+            jx, jy = p0[0] + axx * t, p0[1] + axy * t
+            pygame.draw.line(surf, sh(col, 0.92), (jx, jy), (jx, jy + h), 1)
+
+    # plinth (stone base)
+    pygame.draw.polygon(surf, sh(st['trim'], face_shade * 0.78),
+                        [(g0[0], g0[1] - 6), (g1[0], g1[1] - 6), g1, g0])
+    pygame.draw.line(surf, sh(st['trim'], face_shade * 0.95),
+                     (g0[0], g0[1] - 6), (g1[0], g1[1] - 6), 1)
+
+    # speckle weathering
+    for _ in range(int(abs(axx) * h / 260)):
+        t = rng.random()
+        sx_ = p0[0] + axx * t
+        sy_ = p0[1] + axy * t + rng.uniform(2, h - 7)
+        surf.set_at((int(sx_), int(sy_)), sh(col, rng.uniform(0.82, 1.14)))
+
+    if not win:
+        return
+
+    # arched windows per story/column
+    ncols = max(1, int(abs(axx) / 22))
+    for s in range(stories):
+        for c in range(ncols):
+            t0 = (c + 0.30) / ncols
+            t1 = (c + 0.70) / ncols
+            x0 = p0[0] + axx * t0
+            x1 = p0[0] + axx * t1
+            ymid0 = p0[1] + axy * t0 + s * STORY_PX + 8
+            ymid1 = p0[1] + axy * t1 + s * STORY_PX + 8
+            wgt = 11
+            if arcade and s == stories - 1:   # ground floor arcade arch
+                ay0 = p0[1] + axy * t0 + s * STORY_PX + 5
+                ay1 = p0[1] + axy * t1 + s * STORY_PX + 5
+                ah = h - (s * STORY_PX) - 11
+                pygame.draw.polygon(surf, (52, 50, 56),
+                                    [(x0, ay0 + 4), (x1, ay1 + 4), (x1, ay1 + ah), (x0, ay0 + ah)])
+                pygame.draw.circle(surf, (52, 50, 56),
+                                   (int((x0 + x1) / 2), int((ay0 + ay1) / 2 + 5)), int((x1 - x0) / 2))
+                pygame.draw.arc(surf, sh(st['trim'], face_shade),
+                                (x0 - 1, ay0 - 1, (x1 - x0) + 2, (x1 - x0) + 2), 0, 3.3, 2)
+                continue
+            wcol = sh(st['win'], face_shade * rng.uniform(0.9, 1.1))
+            quad = [(x0, ymid0), (x1, ymid1), (x1, ymid1 + wgt), (x0, ymid0 + wgt)]
+            # arch top
+            pygame.draw.circle(surf, wcol, (int((x0 + x1) / 2), int((ymid0 + ymid1) / 2 + 1)),
+                               max(2, int((x1 - x0) / 2)))
+            pygame.draw.polygon(surf, wcol, quad)
+            # stone trim + sill
+            trim = sh(st['trim'], face_shade)
+            pygame.draw.arc(surf, trim, (x0 - 1, ymid0 - (x1 - x0) / 2,
+                                         (x1 - x0) + 2, (x1 - x0) + 2), 0, 3.4, 1)
+            pygame.draw.line(surf, trim, (x0 - 1, ymid0 + wgt + 1), (x1 + 1, ymid1 + wgt + 1), 2)
+            pygame.draw.line(surf, sh(wcol, 1.3), (x0 + 1, ymid0 + wgt - 3), (x1 - 1, ymid1 + 1), 1)
+            if rng.random() < 0.18:  # shutter / dark pane
+                pygame.draw.polygon(surf, (60, 62, 70), quad)
+
+
+def _roof_hipped(surf, Nt, Et, St, Wt, fw, fh, st, rng, gabled=False):
+    """Tiled sloped roof over wall-top diamond Nt/Et/St/Wt."""
+    roof = st['roof']
+    rh = ROOF_H + min(fw, fh)
+    # eave overhang
+    Nt = (Nt[0], Nt[1] - 2)
+    Et = (Et[0] + 5, Et[1] + 1)
+    St = (St[0], St[1] + 4)
+    Wt = (Wt[0] - 5, Wt[1] + 1)
+    if gabled or fw == fh:
+        inset = 0 if gabled else None
+    # ridge endpoints
+    if fw >= fh:
+        a0, a1 = (0 if gabled else fh / 2), (fw if gabled else fw - fh / 2)
+        RA = _w2px(a0, fh / 2, 0)
+        RB = _w2px(a1, fh / 2, 0)
+    else:
+        a0, a1 = (0 if gabled else fw / 2), (fh if gabled else fh - fw / 2)
+        RA = _w2px(fw / 2, a0, 0)
+        RB = _w2px(fw / 2, a1, 0)
+    base = _w2px(0, 0, 0)
+    RA = (Nt[0] + RA[0] - base[0] + 0, Nt[1] + RA[1] - base[1] - rh + 2)
+    RB = (Nt[0] + RB[0] - base[0] + 0, Nt[1] + RB[1] - base[1] - rh + 2)
+    if RB[0] < RA[0]:
+        RA, RB = RB, RA
+
+    def tiled_face(eave0, eave1, r0, r1, shade):
+        pygame.draw.polygon(surf, sh(roof, shade), [eave0, eave1, r1, r0])
+        rows = 5
+        for i in range(1, rows):
+            t = i / rows
+            q0 = (eave0[0] + (r0[0] - eave0[0]) * t, eave0[1] + (r0[1] - eave0[1]) * t)
+            q1 = (eave1[0] + (r1[0] - eave1[0]) * t, eave1[1] + (r1[1] - eave1[1]) * t)
+            pygame.draw.line(surf, sh(roof, shade * (0.82 + 0.07 * (i % 2))), q0, q1, 1)
+        # scalloped eave edge
+        seg = max(3, int(math.hypot(eave1[0] - eave0[0], eave1[1] - eave0[1]) / 7))
+        for i in range(seg):
+            t = (i + 0.5) / seg
+            ex = eave0[0] + (eave1[0] - eave0[0]) * t
+            ey = eave0[1] + (eave1[1] - eave0[1]) * t
+            pygame.draw.circle(surf, sh(roof, shade * 0.75), (int(ex), int(ey)), 2, 1)
+        pygame.draw.line(surf, sh(roof, shade * 1.25), eave0, eave1, 1)
+
+    if fw >= fh:
+        # SW slope (Wt->St eave) is in shadow side w/ our NE sun
+        tiled_face(Wt, St, RA, RB, 0.84)
+        if gabled:
+            # gable wall triangle on the E end
+            apexE = (RB[0], RB[1])
+            pygame.draw.polygon(surf, sh(st['wall'], 1.02), [St, Et, apexE])
+            pygame.draw.polygon(surf, sh(st['timber'], 1.0), [St, Et, apexE], 1)
+            pygame.draw.circle(surf, sh(st['win'], 0.9),
+                               (int((St[0] + Et[0] + apexE[0]) / 3), int((St[1] + Et[1] + apexE[1]) / 3)), 2)
+        else:
+            tiled_face(St, Et, RB, RB, 1.04)   # SE hip triangle
+    else:
+        tiled_face(St, Et, RA, RB, 1.04)
+        if gabled:
+            apexS = (RB[0], RB[1]) if RB[1] > RA[1] else (RA[0], RA[1])
+            pygame.draw.polygon(surf, sh(st['wall'], 0.82), [Wt, St, apexS])
+            pygame.draw.polygon(surf, sh(st['timber'], 0.9), [Wt, St, apexS], 1)
+        else:
+            tiled_face(Wt, St, RA, RA, 0.84)
+    # ridge cap
+    pygame.draw.line(surf, sh(roof, 1.35), RA, RB, 2)
+    pygame.draw.line(surf, sh(roof, 0.6), (RA[0], RA[1] + 1), (RB[0], RB[1] + 1), 1)
+    return RA, RB
+
+
+def _roof_flat(surf, Nt, Et, St, Wt, st, rng, crenellate=False):
+    top_c = sh(st['wall'], 1.18)
+    pygame.draw.polygon(surf, top_c, [Nt, Et, St, Wt])
+    pygame.draw.lines(surf, sh(st['trim'], 1.05), True, [Nt, Et, St, Wt], 2)
+    inner = [(Nt[0], Nt[1] + 3), (Et[0] - 5, Et[1]), (St[0], St[1] - 3), (Wt[0] + 5, Wt[1])]
+    pygame.draw.polygon(surf, sh(top_c, 0.92), inner)
+    # gravel speckle
+    for _ in range(14):
+        u, v = rng.random(), rng.random()
+        gx = Nt[0] + (Et[0] - Nt[0]) * u + (Wt[0] - Nt[0]) * v
+        gy = Nt[1] + (Et[1] - Nt[1]) * u + (Wt[1] - Nt[1]) * v
+        surf.set_at((int(gx), int(gy)), sh(top_c, rng.uniform(0.85, 1.1)))
+    if crenellate:
+        for edge in ((Wt, St), (St, Et)):
+            e0, e1 = edge
+            seg = max(2, int(math.hypot(e1[0] - e0[0], e1[1] - e0[1]) / 10))
+            for i in range(seg):
+                t = (i + 0.25) / seg
+                mx = e0[0] + (e1[0] - e0[0]) * t
+                my = e0[1] + (e1[1] - e0[1]) * t
+                pygame.draw.rect(surf, sh(st['trim'], 0.95), (mx - 2, my - 4, 5, 5))
+
+
+def _roof_furniture(surf, Nt, Et, St, Wt, st, rng, n):
+    def roof_pt(u, v):
+        return (Nt[0] + (Et[0] - Nt[0]) * u + (Wt[0] - Nt[0]) * v,
+                Nt[1] + (Et[1] - Nt[1]) * u + (Wt[1] - Nt[1]) * v)
+    wall = st['wall']
+    for _ in range(n):
+        u, v = rng.uniform(0.25, 0.75), rng.uniform(0.25, 0.75)
+        bx, by = roof_pt(u, v)
+        kind = rng.random()
+        if kind < 0.5:  # AC unit
+            pygame.draw.polygon(surf, sh(wall, 0.8), [(bx - 6, by - 1), (bx, by - 4), (bx + 6, by - 1), (bx, by + 2)])
+            pygame.draw.polygon(surf, sh(wall, 0.6), [(bx - 6, by - 1), (bx, by + 2), (bx, by + 7), (bx - 6, by + 4)])
+            pygame.draw.polygon(surf, sh(wall, 0.7), [(bx, by + 2), (bx + 6, by - 1), (bx + 6, by + 4), (bx, by + 7)])
+            pygame.draw.ellipse(surf, sh(wall, 0.5), (bx - 4, by - 2, 8, 4))
+        elif kind < 0.8:  # vent pipe
+            pygame.draw.line(surf, sh(wall, 0.6), (bx, by), (bx, by - 8), 3)
+            pygame.draw.line(surf, sh(wall, 0.8), (bx - 3, by - 8), (bx + 3, by - 8), 3)
+        else:  # antenna
+            pygame.draw.line(surf, (150, 154, 162), (bx, by), (bx, by - 16), 1)
+            pygame.draw.line(surf, (150, 154, 162), (bx - 4, by - 10), (bx + 4, by - 13), 1)
+
+
+def _banner(surf, x, y, color, length=20):
+    pygame.draw.line(surf, (90, 76, 56), (x - 5, y - 2), (x + 5, y + 2), 2)
+    pts = [(x - 4, y), (x + 4, y + 3), (x + 4, y + 3 + length), (x, y + length - 1), (x - 4, y + length + 1)]
+    pygame.draw.polygon(surf, color, pts)
+    pygame.draw.polygon(surf, sh(color, 0.6), pts, 1)
+    pygame.draw.circle(surf, sh(color, 1.6), (x, y + 7), 2, 1)
+
+
+def _ivy(surf, x, y, h, rng):
+    for i in range(int(h / 5)):
+        yy = y - i * 5 - rng.randint(0, 3)
+        xx = x + rng.randint(-3, 3) + int(math.sin(i * 1.3) * 3)
+        c = sh((74, 110, 56), rng.uniform(0.75, 1.2))
+        pygame.draw.circle(surf, c, (xx, yy), rng.randint(2, 3))
+
+
+def _volume(surf, nx, ny, vx, vy, fw, fh, stories, st, rng, roof, accent=None,
+            arcade=False, win=True):
+    """Draw one building volume whose footprint origin is at world offset
+    (vx,vy) from the sprite's footprint anchor at pixel (nx,ny)."""
+    zh = stories * STORY_PX
+    bx, by = _w2px(vx, vy)
+    N = (nx + bx, ny + by)
+    E = (nx + bx + fw * HALF_W, ny + by + fw * HALF_H)
+    S = (nx + bx + (fw - fh) * HALF_W, ny + by + (fw + fh) * HALF_H)
+    W = (nx + bx - fh * HALF_W, ny + by + fh * HALF_H)
+    Nt, Et, St, Wt = [(p[0], p[1] - zh) for p in (N, E, S, W)]
+
+    _wall_face(surf, Wt, St, zh, st['wall'], st, rng, stories, 0.78, win=win, arcade=arcade)
+    _wall_face(surf, St, Et, zh, st['wall'], st, rng, stories, 1.0, win=win, arcade=arcade)
+    # corner quoins on the S vertical edge
+    if st['masonry'] in ('stone', 'brick'):
+        for q in range(0, zh - 4, 7):
+            w_ = 3 if (q // 7) % 2 == 0 else 2
+            pygame.draw.rect(surf, sh(st['trim'], 0.92), (S[0] - w_, S[1] - zh + q, w_ * 2, 4))
+    # eave shadow under roofline
+    pygame.draw.line(surf, sh(st['wall'], 0.55), Wt, St, 1)
+    pygame.draw.line(surf, sh(st['wall'], 0.6), St, Et, 1)
+
+    if roof == 'hip':
+        _roof_hipped(surf, Nt, Et, St, Wt, fw, fh, st, rng)
+    elif roof == 'gable':
+        RA, RB = _roof_hipped(surf, Nt, Et, St, Wt, fw, fh, st, rng, gabled=True)
+        # chimney
+        cx_ = RA[0] + (RB[0] - RA[0]) * 0.75
+        cy_ = RA[1] + (RB[1] - RA[1]) * 0.75
+        pygame.draw.rect(surf, sh(st['wall'], 0.9), (cx_ - 2, cy_ - 8, 5, 9))
+        pygame.draw.rect(surf, sh(st['trim'], 0.85), (cx_ - 3, cy_ - 9, 7, 3))
+    elif roof == 'pyramid':
+        _roof_hipped(surf, Nt, Et, St, Wt, min(fw, fh), min(fw, fh), st, rng)
+    else:
+        _roof_flat(surf, Nt, Et, St, Wt, st, rng, crenellate=(roof == 'flat_cren'))
+        _roof_furniture(surf, Nt, Et, St, Wt, st, rng, 1 + stories // 3)
+    return N, E, S, W, Nt, Et, St, Wt
 
 
 def building(seed, fw, fh, stories, style):
+    """AoE-style composed building: main volume + optional annex wing and
+    corner tower, masonry walls, arched windows, tiled roofs, banners, ivy."""
     k = ('bld', seed, fw, fh, stories, style)
     if k in _cache:
         return _cache[k]
     rng = _rand(seed)
     st = BUILDING_STYLES[style]
-    zh = stories * STORY_PX
+
+    sloped = style in ('house', 'shop', 'brick', 'industrial')
+    if sloped:
+        stories = min(stories, 3)
+    roof_main = ('gable' if style in ('house', 'industrial') else 'hip') if sloped \
+        else ('flat_cren' if style == 'concrete' and rng.random() < 0.4 else 'flat')
+
+    has_annex = sloped and fw >= 6 and fh >= 5 and rng.random() < 0.6
+    has_tower = sloped and fw >= 6 and fh >= 5 and rng.random() < 0.45 and style != 'house'
+
+    zh_main = stories * STORY_PX
+    extra_top = ROOF_H + min(fw, fh) + (STORY_PX + 14 if has_tower else 0) + 26
     sw = (fw + fh) * HALF_W
     shh = (fw + fh) * HALF_H
-    surf = pygame.Surface((sw + 4, shh + zh + 30), pygame.SRCALPHA)
-    nx, ny = fh * HALF_W + 2, zh + 24
-    N = (nx, ny)
-    E = (nx + fw * HALF_W, ny + fw * HALF_H)
-    S = (nx + (fw - fh) * HALF_W, ny + (fw + fh) * HALF_H)
-    W = (nx - fh * HALF_W, ny + fh * HALF_H)
-    Nt, Et, St, Wt = [(p[0], p[1] - zh) for p in (N, E, S, W)]
+    surf = pygame.Surface((sw + 12, shh + zh_main + extra_top), pygame.SRCALPHA)
+    nx, ny = fh * HALF_W + 6, zh_main + extra_top - 8
 
-    wall = sh(st['wall'], rng.uniform(0.92, 1.06))
-    left_c, right_c, top_c = sh(wall, 0.72), sh(wall, 0.96), sh(wall, 1.22)
+    annex_h = max(2, fh // 2)
+    annex_w = max(3, fw // 2)
+    tower_sz = 3
 
-    pygame.draw.polygon(surf, left_c, [Wt, St, S, W])
-    pygame.draw.polygon(surf, right_c, [St, Et, E, S])
+    # main volume sits at the back if there's an annex
+    main_fh = fh - (annex_h if has_annex else 0)
+    _volume(surf, nx, ny, 0, 0, fw, max(2, main_fh), stories, st, rng, roof_main,
+            arcade=(style == 'concrete' and stories >= 3))
 
-    # --- facade detailing helper -------------------------------------
-    def face(p0, p1, ncols, fshade, face_id):
-        """Detail the face whose top edge runs p0->p1 (ground edge below)."""
-        axx, axy = p1[0] - p0[0], p1[1] - p0[1]
-        col_w = abs(axx) / max(1, ncols)
-        for s in range(stories):
-            ytop = p0[1] + s * STORY_PX
-            # floor band
-            band = sh(wall, fshade * 0.92)
-            pygame.draw.line(surf, band, (p0[0], ytop + axy * 0 + 1 + (axy / abs(axx)) * 0 if axx else ytop),
-                             (p0[0], ytop), 1)
-            for c in range(ncols):
-                t0 = (c + 0.18) / ncols
-                t1 = (c + 0.82) / ncols
-                x0 = p0[0] + axx * t0
-                x1 = p0[0] + axx * t1
-                yb0 = p0[1] + axy * t0
-                yb1 = p0[1] + axy * t1
-                wy0 = yb0 + s * STORY_PX + 8
-                wy1 = yb1 + s * STORY_PX + 8
-                hgt = 13
-                r = rng.random()
-                if r < 0.18:
-                    wcol = sh(st['lit'], fshade * 1.05)     # bright sky glint
-                elif r < 0.24:
-                    wcol = (52, 56, 66)                     # broken / dark interior
-                else:
-                    wcol = sh(st['win'], fshade)
-                quad = [(x0, wy0), (x1, wy1), (x1, wy1 + hgt), (x0, wy0 + hgt)]
-                pygame.draw.polygon(surf, wcol, quad)
-                # frame + sill
-                pygame.draw.polygon(surf, sh(wall, fshade * 0.7), quad, 1)
-                pygame.draw.line(surf, sh(wall, fshade * 1.18),
-                                 (x0, wy0 + hgt + 1), (x1, wy1 + hgt + 1), 1)
-                if r < 0.18:  # diagonal sky glint across the pane
-                    pygame.draw.line(surf, sh(wcol, 1.25), (x0 + 1, wy0 + hgt - 3), (x1 - 1, wy1 + 2), 1)
-                if rng.random() < 0.06:  # cracked pane
-                    pygame.draw.line(surf, (236, 240, 244), (x0 + 1, wy0 + 2), (x1 - 1, wy1 + hgt - 3), 1)
-        # dirt streaks
-        for _ in range(fw + fh):
-            t = rng.random()
-            x = p0[0] + axx * t
-            y0_ = p0[1] + axy * t + rng.randint(0, zh // 2)
-            streak = pygame.Surface((2, rng.randint(10, max(11, zh // 2))), pygame.SRCALPHA)
-            streak.fill((40, 38, 36, 30))
-            surf.blit(streak, (x, y0_))
+    if has_annex:
+        ast = min(stories, 1 + rng.randint(0, 1))
+        _volume(surf, nx, ny, 0, fh - annex_h, annex_w, annex_h, ast, st, rng,
+                'hip' if rng.random() < 0.7 else 'gable')
+    if has_tower:
+        tst = stories + 1
+        _volume(surf, nx, ny, fw - tower_sz, fh - tower_sz, tower_sz, tower_sz,
+                tst, st, rng, 'pyramid', win=True)
 
-    face(Wt, St, max(1, fw), 0.62, 0)
-    face(St, Et, max(1, fh), 0.86, 1)
+    # ---- dressing on the front (SW face of the front-most volume) ----
+    fr_fh = annex_h if has_annex else fh
+    fr_fw = annex_w if has_annex else fw
+    Wf = (nx - fr_fh * HALF_W + _w2px(0, fh - fr_fh)[0],
+          ny + fr_fh * HALF_H + _w2px(0, fh - fr_fh)[1])
+    Sf = (Wf[0] + fr_fw * HALF_W, Wf[1] + fr_fw * HALF_H)
 
-    # --- ground floor -------------------------------------------------
-    if style in ('shop', 'brick') and stories >= 1:
-        # storefront on SW face: big window, door, awning, neon sign
-        gx0, gy0 = W[0] + 3, W[1] - 1
-        gx1, gy1 = S[0] - 2, S[1] - 1
-        mid = 0.55
-        pygame.draw.polygon(surf, (26, 30, 40),
-                            [(gx0, gy0 - 16), (gx0 + (gx1 - gx0) * mid, gy0 + (gy1 - gy0) * mid - 16),
-                             (gx0 + (gx1 - gx0) * mid, gy0 + (gy1 - gy0) * mid - 2), (gx0, gy0 - 2)])
-        pane = (64, 84, 104) if rng.random() < 0.5 else (40, 44, 56)
-        pygame.draw.polygon(surf, pane,
-                            [(gx0 + 2, gy0 - 14),
-                             (gx0 + (gx1 - gx0) * mid - 2, gy0 + (gy1 - gy0) * mid - 14),
-                             (gx0 + (gx1 - gx0) * mid - 2, gy0 + (gy1 - gy0) * mid - 4),
-                             (gx0 + 2, gy0 - 4)])
-        pygame.draw.line(surf, (130, 160, 190), (gx0 + 3, gy0 - 13),
-                         (gx0 + (gx1 - gx0) * mid - 4, gy0 + (gy1 - gy0) * mid - 13), 1)
-        # door
-        dx0 = gx0 + (gx1 - gx0) * 0.7
-        dy0 = gy0 + (gy1 - gy0) * 0.7
-        pygame.draw.polygon(surf, (34, 30, 28),
-                            [(dx0, dy0 - 15), (dx0 + 7, dy0 - 11.5), (dx0 + 7, dy0 + 1), (dx0, dy0 - 2)])
-        # awning
-        aw = rng.choice([(168, 60, 60), (60, 110, 150), (150, 120, 60), (80, 130, 80)])
-        pygame.draw.polygon(surf, aw, [(gx0 - 1, gy0 - 17), (gx1, gy1 - 17),
-                                       (gx1 + 4, gy1 - 12), (gx0 + 3, gy0 - 12)])
-        for i in range(4):
-            t0 = i / 4
-            pygame.draw.line(surf, sh(aw, 0.7),
-                             (gx0 - 1 + (gx1 - gx0 + 1) * t0 + 2, gy0 - 14 + (gy1 - gy0) * t0),
-                             (gx0 + 3 + (gx1 - gx0 + 1) * t0, gy0 - 12 + (gy1 - gy0) * t0), 2)
-        # neon sign above awning
-        if style == 'shop':
-            neon = rng.choice(NEON_COLORS)
-            sx0 = gx0 + 3
-            sy0 = gy0 - 27
-            nchars = rng.choice(NEON_WORDS)
-            bw = nchars * 7 + 6
-            board = [(sx0, sy0), (sx0 + bw, sy0 + bw * 0.5), (sx0 + bw, sy0 + bw * 0.5 + 10), (sx0, sy0 + 10)]
-            pygame.draw.polygon(surf, sh(neon, 0.55), board)
-            pygame.draw.polygon(surf, sh(neon, 0.35), board, 1)
-            for i in range(nchars):
-                ch_x = sx0 + 4 + i * 7
-                ch_y = sy0 + 2 + (4 + i * 7) * 0.5
-                pygame.draw.rect(surf, sh(neon, 1.4), (ch_x, ch_y, 4, 6), 1)
+    # doorway with step
+    dx0 = Wf[0] + (Sf[0] - Wf[0]) * 0.62
+    dy0 = Wf[1] + (Sf[1] - Wf[1]) * 0.62
+    pygame.draw.polygon(surf, (62, 46, 36),
+                        [(dx0, dy0 - 16), (dx0 + 7, dy0 - 12.5), (dx0 + 7, dy0 + 1), (dx0, dy0 - 2)])
+    pygame.draw.circle(surf, (62, 46, 36), (int(dx0 + 3.5), int(dy0 - 15)), 4)
+    pygame.draw.arc(surf, sh(st['trim'], 0.9), (dx0 - 1, dy0 - 20, 10, 10), 0, 3.4, 2)
+    pygame.draw.line(surf, sh(st['trim'], 0.8), (dx0 - 1, dy0 + 2), (dx0 + 8, dy0 + 5), 2)
+    pygame.draw.circle(surf, (200, 180, 120), (int(dx0 + 6), int(dy0 - 7)), 1)
 
-    # fire escape on some brick/concrete buildings (SE face)
-    if style in ('brick', 'concrete') and stories >= 3 and rng.random() < 0.6:
-        fx = (St[0] + Et[0]) / 2
-        fy = (St[1] + Et[1]) / 2
-        rail = sh(wall, 0.45)
+    if style == 'shop':
+        aw = rng.choice(AWNING_COLORS)
+        ax0, ay0 = Wf[0] + 2, Wf[1] - 20
+        ax1 = Wf[0] + (Sf[0] - Wf[0]) * 0.55
+        ay1 = Wf[1] + (Sf[1] - Wf[1]) * 0.55 - 20
+        pygame.draw.polygon(surf, aw, [(ax0, ay0), (ax1, ay1), (ax1 + 5, ay1 + 6), (ax0 + 5, ay0 + 6)])
+        seg = max(3, int((ax1 - ax0) / 7))
+        for i in range(seg):
+            t = i / seg
+            if i % 2 == 0:
+                continue
+            x0_ = ax0 + (ax1 - ax0) * t
+            y0_ = ay0 + (ay1 - ay0) * t
+            x1_ = ax0 + (ax1 - ax0) * (t + 1 / seg)
+            y1_ = ay0 + (ay1 - ay0) * (t + 1 / seg)
+            pygame.draw.polygon(surf, (226, 222, 210),
+                                [(x0_, y0_), (x1_, y1_), (x1_ + 5, y1_ + 6), (x0_ + 5, y0_ + 6)])
+        pygame.draw.line(surf, sh(aw, 0.55), (ax0 + 5, ay0 + 7), (ax1 + 5, ay1 + 7), 2)
+        # painted sign above
+        neon = rng.choice(NEON_COLORS)
+        pygame.draw.polygon(surf, sh(neon, 0.5),
+                            [(ax0 + 2, ay0 - 9), (ax1 - 4, ay1 - 9), (ax1 - 4, ay1 - 1), (ax0 + 2, ay0 - 1)])
+        for i in range(3):
+            pygame.draw.rect(surf, sh(neon, 1.3), (ax0 + 5 + i * 7, ay0 - 7 + i * 3, 4, 5), 1)
+
+    # banner on the SE face
+    if rng.random() < 0.5 and stories >= 2:
+        S_ = (nx + (fw - fh) * HALF_W, ny + (fw + fh) * HALF_H)
+        E_ = (nx + fw * HALF_W, ny + fw * HALF_H)
+        bx_ = S_[0] + (E_[0] - S_[0]) * rng.uniform(0.3, 0.7)
+        by_ = S_[1] + (E_[1] - S_[1]) * rng.uniform(0.3, 0.7) - zh_main + 8
+        _banner(surf, int(bx_), int(by_), rng.choice(BANNER_COLORS))
+
+    # ivy on the W corner
+    if rng.random() < 0.45 and style != 'glass':
+        W_ = (nx - fh * HALF_W, ny + fh * HALF_H)
+        _ivy(surf, int(W_[0] + 3), int(W_[1] - 2), zh_main * 0.8, rng)
+
+    # fire escape stays for tall flat-roofed city blocks
+    if not sloped and stories >= 4 and rng.random() < 0.5:
+        S_ = (nx + (fw - fh) * HALF_W, ny + (fw + fh) * HALF_H)
+        E_ = (nx + fw * HALF_W, ny + fw * HALF_H)
+        fx = (S_[0] + E_[0]) / 2
+        fy = (S_[1] + E_[1]) / 2
+        rail = sh(st['wall'], 0.5)
         for s in range(1, stories):
-            y = fy + s * STORY_PX - STORY_PX // 2
+            y = fy - s * STORY_PX
             pygame.draw.line(surf, rail, (fx - 9, y), (fx + 9, y + 4), 2)
-            pygame.draw.line(surf, rail, (fx - 9, y - 6), (fx + 9, y - 2), 1)
             pygame.draw.line(surf, rail, (fx - 9, y - 6), (fx - 9, y), 1)
             pygame.draw.line(surf, rail, (fx + 9, y - 2), (fx + 9, y + 4), 1)
             pygame.draw.line(surf, rail, (fx - 7, y), (fx + 5, y - STORY_PX + 2), 1)
 
-    # --- roof ----------------------------------------------------------
-    pygame.draw.polygon(surf, top_c, [Nt, Et, St, Wt])
-    # parapet
-    pygame.draw.lines(surf, sh(wall, 1.25), True, [Nt, Et, St, Wt], 2)
-    pygame.draw.lines(surf, sh(wall, 0.4), False, [Wt, St, Et], 1)
-    inner = [(Nt[0], Nt[1] + 3), (Et[0] - 5, Et[1]), (St[0], St[1] - 3), (Wt[0] + 5, Wt[1])]
-    pygame.draw.polygon(surf, sh(top_c, 0.93), inner)
-    # roof furniture
-    def roof_pt(u, v):
-        return (Nt[0] + (Et[0] - Nt[0]) * u + (Wt[0] - Nt[0]) * v,
-                Nt[1] + (Et[1] - Nt[1]) * u + (Wt[1] - Nt[1]) * v)
-    for _ in range(min(3, 1 + stories // 3)):
-        u, v = rng.uniform(0.25, 0.75), rng.uniform(0.25, 0.75)
-        bx, by = roof_pt(u, v)
-        kind = rng.random()
-        if kind < 0.5:  # AC unit
-            pygame.draw.polygon(surf, sh(wall, 0.75), [(bx - 6, by - 1), (bx, by - 4), (bx + 6, by - 1), (bx, by + 2)])
-            pygame.draw.polygon(surf, sh(wall, 0.55), [(bx - 6, by - 1), (bx, by + 2), (bx, by + 7), (bx - 6, by + 4)])
-            pygame.draw.polygon(surf, sh(wall, 0.65), [(bx, by + 2), (bx + 6, by - 1), (bx + 6, by + 4), (bx, by + 7)])
-            pygame.draw.ellipse(surf, sh(wall, 0.4), (bx - 4, by - 2, 8, 4))
-        elif kind < 0.8:  # vent pipe
-            pygame.draw.line(surf, sh(wall, 0.5), (bx, by), (bx, by - 8), 3)
-            pygame.draw.line(surf, sh(wall, 0.7), (bx - 3, by - 8), (bx + 3, by - 8), 3)
-        else:  # antenna
-            pygame.draw.line(surf, (140, 144, 152), (bx, by), (bx, by - 16), 1)
-            pygame.draw.line(surf, (140, 144, 152), (bx - 4, by - 10), (bx + 4, by - 13), 1)
-    if style == 'brick' and stories >= 4 and rng.random() < 0.5:  # water tank
-        bx, by = roof_pt(0.7, 0.3)
-        pygame.draw.ellipse(surf, (60, 48, 40), (bx - 7, by - 18, 14, 6))
-        pygame.draw.rect(surf, (74, 58, 48), (bx - 7, by - 15, 14, 12))
-        pygame.draw.rect(surf, (60, 48, 40), (bx - 7, by - 15, 14, 12), 1)
-        pygame.draw.polygon(surf, (86, 68, 56), [(bx - 8, by - 15), (bx, by - 22), (bx + 8, by - 15)])
     if style == 'tower':
-        tipx, tipy = roof_pt(0.5, 0.5)
-        pygame.draw.line(surf, (160, 170, 190), (tipx, tipy), (tipx, tipy - 34), 2)
+        # glass spire crown + aviation light
+        Nt = (nx, ny - zh_main)
+        St = (nx + (fw - fh) * HALF_W, ny + (fw + fh) * HALF_H - zh_main)
+        tipx = (Nt[0] + St[0]) / 2
+        tipy = (Nt[1] + St[1]) / 2
+        pygame.draw.polygon(surf, sh(st['wall'], 1.15),
+                            [(tipx - 14, tipy + 2), (tipx, tipy - 16), (tipx + 14, tipy + 2)])
+        pygame.draw.line(surf, (170, 182, 200), (tipx, tipy - 16), (tipx, tipy - 34), 2)
         pygame.draw.circle(surf, (255, 90, 90), (int(tipx), int(tipy - 34)), 3)
-        # helix logo on SE face top
-        lx, ly = (St[0] + Et[0]) / 2, (St[1] + Et[1]) / 2 - zh + STORY_PX * 1.2
-        for i in range(8):
-            yy = ly + i * 3
-            xx = math.sin(i * 0.9) * 5
-            pygame.draw.circle(surf, (120, 220, 255), (int(lx + xx), int(yy)), 1)
-            pygame.draw.circle(surf, (120, 220, 255), (int(lx - xx), int(yy)), 1)
 
     _cache[k] = (surf, (nx, ny))
     return _cache[k]
