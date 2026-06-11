@@ -1,154 +1,119 @@
-import pygame
+"""Particles + ambient rain. Particles live in world space (tile units)
+with a z height in pixels; rain is screen-space."""
 import math
 import random
+import pygame
+from src.constants import WIDTH, HEIGHT
+from src.iso import world_to_screen
 
 
-# --- Glow helper ---
-def draw_glow(surface, cx, cy, radius, color, alpha=80):
-    s = pygame.Surface((radius*2+2, radius*2+2), pygame.SRCALPHA)
-    for r in range(radius, 0, -max(1, radius//6)):
-        a = int(alpha * (1 - r/radius) ** 1.4)
-        pygame.draw.circle(s, (*color[:3], a), (radius+1, radius+1), r)
-    surface.blit(s, (cx - radius - 1, cy - radius - 1))
+class P:
+    __slots__ = ('x', 'y', 'z', 'vx', 'vy', 'vz', 'life', 'total', 'color', 'size', 'grav')
+
+    def __init__(self, x, y, z, vx, vy, vz, life, color, size, grav=120.0):
+        self.x, self.y, self.z = x, y, z
+        self.vx, self.vy, self.vz = vx, vy, vz
+        self.life = self.total = life
+        self.color, self.size, self.grav = color, size, grav
 
 
-def draw_glow_line(surface, p1, p2, color, width=3, alpha=120):
-    s = pygame.Surface((abs(p2[0]-p1[0])+width*4+2, abs(p2[1]-p1[1])+width*4+2), pygame.SRCALPHA)
-    ox = min(p1[0], p2[0]) - width*2
-    oy = min(p1[1], p2[1]) - width*2
-    for w in range(width+4, 0, -1):
-        a = int(alpha * (1 - w/(width+4))**1.5)
-        pygame.draw.line(s, (*color[:3], a),
-                         (p1[0]-ox, p1[1]-oy), (p2[0]-ox, p2[1]-oy), w)
-    surface.blit(s, (ox, oy))
-
-
-class Particle:
-    def __init__(self, x, y, color, vel_x=None, vel_y=None, size=4, life=30, glow=False):
-        self.x = x
-        self.y = y
-        self.color = color
-        self.vx = vel_x if vel_x is not None else random.uniform(-3, 3)
-        self.vy = vel_y if vel_y is not None else random.uniform(-3, 3)
-        self.size = size
-        self.max_life = life
-        self.life = life
-        self.glow = glow
-
-    def update(self):
-        self.x += self.vx
-        self.y += self.vy
-        self.vx *= 0.90
-        self.vy *= 0.90
-        self.vy += 0.04  # slight gravity
-        self.life -= 1
-
-    def draw(self, surface, offset_x=0, offset_y=0):
-        alpha = self.life / self.max_life
-        r = max(1, int(self.size * alpha))
-        sx = int(self.x - offset_x)
-        sy = int(self.y - offset_y)
-        c = tuple(int(ch * alpha) for ch in self.color[:3])
-        if self.glow and r > 1:
-            draw_glow(surface, sx, sy, r*3, self.color[:3], int(100*alpha))
-        pygame.draw.circle(surface, c, (sx, sy), r)
-
-    @property
-    def dead(self):
-        return self.life <= 0
-
-
-class ParticleSystem:
+class Particles:
     def __init__(self):
-        self.particles = []
+        self.parts = []
+        self.rings = []   # (x, y, r, max_r, life)
+        self.rain = [[random.uniform(0, WIDTH), random.uniform(0, HEIGHT),
+                      random.uniform(6, 13)] for _ in range(90)]
 
-    def emit_hit(self, x, y, color=(255, 200, 50), count=14):
-        for _ in range(count):
-            angle = random.uniform(0, math.pi * 2)
-            speed = random.uniform(1.5, 6)
-            self.particles.append(Particle(
-                x, y, color,
-                math.cos(angle) * speed,
-                math.sin(angle) * speed,
-                size=random.randint(3, 7),
-                life=random.randint(18, 35),
-                glow=True
-            ))
-        # Sparks
-        for _ in range(6):
-            angle = random.uniform(0, math.pi * 2)
-            speed = random.uniform(4, 10)
-            self.particles.append(Particle(
-                x, y, (255, 255, 220),
-                math.cos(angle) * speed,
-                math.sin(angle) * speed,
-                size=2, life=random.randint(8, 16), glow=False
-            ))
+    # ---- emitters ----
+    def _burst(self, x, y, n, color, speed=2.0, life=0.5, size=3, z=20, vz=60):
+        for _ in range(n):
+            a = random.random() * 2 * math.pi
+            s = speed * random.uniform(0.3, 1.0)
+            self.parts.append(P(x, y, z + random.uniform(-4, 10),
+                                math.cos(a) * s, math.sin(a) * s,
+                                random.uniform(0, vz),
+                                life * random.uniform(0.6, 1.3), color,
+                                random.randint(max(1, size - 1), size + 1)))
 
-    def emit_blood(self, x, y, count=10):
-        for _ in range(count):
-            angle = random.uniform(-math.pi*0.8, -math.pi*0.2) + random.uniform(-0.5, 0.5)
-            speed = random.uniform(1, 5)
-            self.particles.append(Particle(
-                x, y, random.choice([(180,20,20),(200,40,30),(160,10,10)]),
-                math.cos(angle) * speed,
-                math.sin(angle) * speed,
-                size=random.randint(2, 6),
-                life=random.randint(22, 45)
-            ))
+    def hit(self, x, y):
+        self._burst(x, y, 8, (255, 226, 140), 2.4, 0.35)
 
-    def emit_death(self, x, y, color=(200, 180, 50), count=35):
-        for _ in range(count):
-            angle = random.uniform(0, math.pi * 2)
-            speed = random.uniform(0.5, 7)
-            self.particles.append(Particle(
-                x, y, color,
-                math.cos(angle) * speed,
-                math.sin(angle) * speed,
-                size=random.randint(4, 12),
-                life=random.randint(35, 80),
-                glow=True
-            ))
+    def blood(self, x, y):
+        self._burst(x, y, 10, (190, 50, 56), 2.0, 0.5)
 
-    def emit_parry(self, x, y):
-        for _ in range(28):
-            angle = random.uniform(0, math.pi * 2)
-            speed = random.uniform(4, 10)
-            self.particles.append(Particle(
-                x, y, random.choice([(255,255,180),(255,230,80),(255,255,255)]),
-                math.cos(angle) * speed,
-                math.sin(angle) * speed,
-                size=random.randint(3, 9),
-                life=random.randint(20, 40),
-                glow=True
-            ))
+    def block_spark(self, x, y):
+        self._burst(x, y, 6, (200, 205, 220), 2.6, 0.3, size=2)
 
-    def emit_grace(self, x, y):
-        for _ in range(4):
-            self.particles.append(Particle(
-                x + random.uniform(-8, 8),
-                y + random.uniform(-5, 5),
-                random.choice([(212,175,55),(240,210,80),(255,230,120)]),
-                random.uniform(-0.6, 0.6),
-                random.uniform(-3.5, -1.5),
-                size=random.randint(2, 5),
-                life=random.randint(30, 55),
-                glow=True
-            ))
+    def parry_spark(self, x, y):
+        self._burst(x, y, 18, (140, 220, 255), 3.4, 0.5, size=3)
+        self.rings.append([x, y, 0.2, 1.6, 0.35])
 
-    def emit_roll_dust(self, x, y):
-        for _ in range(4):
-            self.particles.append(Particle(
-                x, y, (140, 130, 110),
-                random.uniform(-2, 2), random.uniform(-1, 0.5),
-                size=random.randint(3, 6), life=random.randint(12, 22)
-            ))
+    def death_burst(self, x, y, big=False):
+        n = 40 if big else 18
+        self._burst(x, y, n, (150, 210, 255), 3.0 if big else 2.2, 0.9, size=3)
+        self.rings.append([x, y, 0.2, 2.6 if big else 1.4, 0.5])
 
-    def update(self):
-        self.particles = [p for p in self.particles if not p.dead]
-        for p in self.particles:
-            p.update()
+    def shard_sparkle(self, x, y):
+        self._burst(x, y, 2, (170, 220, 255), 0.6, 0.7, size=2, vz=40)
 
-    def draw(self, surface, cam_offset_x=0, cam_offset_y=0):
-        for p in self.particles:
-            p.draw(surface, cam_offset_x, cam_offset_y)
+    def static_burst(self, x, y):
+        self._burst(x, y, 14, (130, 230, 255), 2.6, 0.4, size=2)
+
+    def note(self, x, y):
+        self._burst(x, y, 5, (210, 150, 255), 1.4, 0.7, size=2, z=42)
+
+    def slam(self, x, y, r):
+        self.rings.append([x, y, 0.2, r, 0.3])
+        self._burst(x, y, 14, (220, 190, 120), 3.0, 0.4)
+
+    def shockwave(self, x, y):
+        self.rings.append([x, y, 0.3, 4.0, 0.6])
+        self._burst(x, y, 30, (255, 200, 110), 4.0, 0.7)
+
+    def beacon_idle(self, x, y):
+        if random.random() < 0.25:
+            self.parts.append(P(x + random.uniform(-0.3, 0.3), y + random.uniform(-0.3, 0.3),
+                                10, 0, 0, 36, 1.2, (120, 215, 255), 2, grav=0))
+
+    # ---- update / draw ----
+    def update(self, dt):
+        for p in self.parts[:]:
+            p.life -= dt
+            if p.life <= 0:
+                self.parts.remove(p)
+                continue
+            p.x += p.vx * dt
+            p.y += p.vy * dt
+            p.z += p.vz * dt
+            p.vz -= p.grav * dt
+            if p.z < 0:
+                p.z = 0
+                p.vz *= -0.4
+        for r in self.rings[:]:
+            r[4] -= dt
+            r[2] += (r[3] - r[2]) * 10 * dt
+            if r[4] <= 0:
+                self.rings.remove(r)
+        for drop in self.rain:
+            drop[0] -= drop[2] * 0.35
+            drop[1] += drop[2]
+            if drop[1] > HEIGHT or drop[0] < 0:
+                drop[0] = random.uniform(0, WIDTH * 1.2)
+                drop[1] = random.uniform(-30, -5)
+
+    def draw_world(self, screen, ox, oy):
+        for r in self.rings:
+            sx, sy = world_to_screen(r[0], r[1])
+            rad = r[2]
+            pygame.draw.ellipse(screen, (200, 220, 255),
+                                (sx + ox - rad * 32, sy + oy - rad * 16, rad * 64, rad * 32), 2)
+        for p in self.parts:
+            sx, sy = world_to_screen(p.x, p.y, p.z)
+            a = max(0.0, min(1.0, p.life / p.total))
+            c = (int(p.color[0] * a + 20 * (1 - a)), int(p.color[1] * a + 20 * (1 - a)),
+                 int(p.color[2] * a + 24 * (1 - a)))
+            pygame.draw.circle(screen, c, (int(sx + ox), int(sy + oy)), max(1, int(p.size * a + 0.5)))
+
+    def draw_rain(self, screen):
+        for x, y, s in self.rain:
+            pygame.draw.line(screen, (96, 110, 130), (x, y), (x - s * 0.3, y + s), 1)

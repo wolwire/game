@@ -1,502 +1,682 @@
-import pygame
-import sys
+"""STILLWAKE — a 2.5D isometric open-world souls-like set in Meridian City.
+
+Run:  python3 main.py
+"""
 import math
 import random
-import os
+import sys
+
+import pygame
 
 pygame.init()
-pygame.display.set_mode((1280, 720))
 
 from src.constants import *
-from src.camera import Camera
+from src.iso import world_to_screen, screen_to_world
+from src import assets
+from src.worldgen import World, district_at
 from src.player import Player
 from src.enemy import Enemy
 from src.boss import Boss
-from src.particles import ParticleSystem
-from src.world import (draw_tiles, SiteOfGrace, LoreFragment, RunePickup,
-                        Decoration, WORLD_MAKERS, BOSS_TYPES, BOSS_SPAWN_OFFSETS)
-from src.ui import (draw_hud, draw_boss_bar, draw_status_text, draw_area_name,
-                     draw_text_screen, draw_parry_success, draw_pickup_text)
-from data.lore import (INTRO, CONTROLS, AREA_NAMES, GRACE_MESSAGES,
-                        BOSS_INTRO, VICTORY_TEXT, ENDING_RESTORE, ENDING_BURN,
-                        LORE_FRAGMENTS, DEATH_MESSAGES)
-
-
-class GameState:
-    INTRO = 'intro'
-    CONTROLS = 'controls'
-    PLAYING = 'playing'
-    BOSS_INTRO = 'boss_intro'
-    DEAD = 'dead'
-    GRACE = 'grace'
-    LORE = 'lore'
-    VICTORY = 'victory'
-    ENDING = 'ending'
+from src.camera import Camera
+from src.particles import Particles
+from src import ui
+from src.entity import dist, Projectile
+from data import story
 
 
 class Game:
     def __init__(self):
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
-        pygame.display.set_caption("TARNISHED — A Lands Between Tale")
+        pygame.display.set_caption("STILLWAKE — a tale of the Stillness")
         self.clock = pygame.time.Clock()
+        self.state = 'title'
+        self.t = 0.0
+        self.state_t = 0.0
 
-        self.state = GameState.INTRO
-        self.area_idx = 0
-        self.load_area(0)
-        self.particles = ParticleSystem()
-
-        # Screen text state
-        self.text_lines = INTRO
-        self.text_alpha = 0
-        self.fade_in = True
-
-        # Notification
-        self.pickup_text = ''
-        self.pickup_timer = 0
-
-        # Area name display
-        self.area_name_alpha = 0
-        self.area_name_timer = 0
-
-        # Death state
-        self.death_fade = 0
-        self.respawn_delay = 0
-
-        # Boss intro state
-        self.boss_intro_lines = []
-        self.boss_intro_timer = 0
-
-        # Parry text
-        self.parry_text_pos = None
-        self.parry_text_timer = 0
-
-        # Grace menu
-        self.grace_choice = 0
-
-        # Lore text
-        self.lore_lines = []
-
-        # Ending
-        self.ending_lines = []
-        self.ending_alpha = 0
-
-        # Persistent rune drop
-        self.rune_pickups = []
-
-        # Frames elapsed
-        self.frame = 0
-
-    def load_area(self, idx):
-        maker = WORLD_MAKERS[idx]
-        self.tiles, self.walls, entities_data, graces_data, lore_data, decorations_data, mw, mh = maker()
-        self.camera = Camera(mw, mh)
-
-        spawn_x = 10 * TILE_SIZE
-        spawn_y = 8 * TILE_SIZE
-        self.player = Player(spawn_x, spawn_y)
+        self.world = World()
+        self.player = Player(*self.world.spawn)
+        self.camera = Camera(self.player.x, self.player.y)
+        self.particles = Particles()
+        self.vignette = assets.vignette()
+        ui.build_minimap(self.world)
 
         self.enemies = []
-        for etype, ex, ey in entities_data:
-            self.enemies.append(Enemy(ex, ey, etype))
+        self.spawn_enemies()
+        self.projectiles = []
 
-        bx, by = BOSS_SPAWN_OFFSETS[idx]
-        self.boss = Boss(bx, by, BOSS_TYPES[idx])
+        self.bosses = {}
+        for key, b in self.world.bosses.items():
+            self.bosses[key] = Boss(b['kind'], b['center'][0], b['center'][1],
+                                    b['center'], b['radius'])
+        self.bosses_defeated = set()
+        self.active_boss = None
 
-        self.graces = graces_data
-        self.lore_fragments = lore_data
-        self.decorations = decorations_data
-        self.rune_pickups = []
+        self.last_beacon = self.world.beacons[0][:2]
+        self.gate_open = False
+        self.set_gate(False)
 
-        self.camera.offset.x = spawn_x - WIDTH // 2
-        self.camera.offset.y = spawn_y - HEIGHT // 2
+        self.echo = None              # (x, y, shards) dropped on death
+        self.area = district_at(int(self.player.x), int(self.player.y))
+        self.banner = (story.AREA_NAMES.get(self.area, ''), story.AREA_DESC.get(self.area, ''))
+        self.banner_t = 0.0
+        self.flash_msg = None
+        self.flash_t = 0.0
 
-    def handle_input_intro(self, event):
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN:
-            if self.state == GameState.INTRO:
-                self.state = GameState.CONTROLS
-                self.text_lines = CONTROLS
-            elif self.state == GameState.CONTROLS:
-                self.state = GameState.PLAYING
-                self.show_area_name()
-            elif self.state == GameState.LORE:
-                self.state = GameState.PLAYING
-            elif self.state == GameState.BOSS_INTRO:
-                self.state = GameState.PLAYING
+        # state payloads
+        self.text_lines = []
+        self.text_title = None
+        self.text_next = 'playing'
+        self.dialogue = None          # (name, pages, page_idx)
+        self.npc_progress = {}
+        self.beacon_sel = 0
+        self.beacon_msg = ''
+        self.death_msg = ''
+        self.ending_sel = 0
+        self.lore_found = set()
+        self.pending_boss = None
 
-    def handle_input_game(self, event):
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_z:
-                if self.player.light_attack():
-                    pass
-            elif event.key == pygame.K_x:
-                if self.player.heavy_attack():
-                    pass
-            elif event.key == pygame.K_SPACE:
-                keys = pygame.key.get_pressed()
-                move = pygame.math.Vector2(0, 0)
-                if keys[pygame.K_w] or keys[pygame.K_UP]: move.y -= 1
-                if keys[pygame.K_s] or keys[pygame.K_DOWN]: move.y += 1
-                if keys[pygame.K_a] or keys[pygame.K_LEFT]: move.x -= 1
-                if keys[pygame.K_d] or keys[pygame.K_RIGHT]: move.x += 1
-                self.player.roll(move)
-            elif event.key == pygame.K_q:
-                self.player.parry()
-            elif event.key == pygame.K_f:
-                self.player.use_flask()
-            elif event.key == pygame.K_ESCAPE:
+    # ------------------------------------------------------------ setup ---
+    def spawn_enemies(self):
+        self.enemies = [Enemy(kind, x, y, r) for kind, x, y, r in self.world.enemy_spawns]
+
+    def set_gate(self, opened):
+        self.gate_open = opened
+        for (x, y) in self.world.gate_tiles:
+            self.world.solid[y][x] = not opened
+
+    def flash(self, msg, t=2.5):
+        self.flash_msg = msg
+        self.flash_t = t
+
+    def set_state(self, s):
+        self.state = s
+        self.state_t = 0.0
+
+    # ------------------------------------------------------------ events ---
+    def handle_events(self):
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
                 pygame.quit()
                 sys.exit()
+            if ev.type != pygame.KEYDOWN:
+                continue
+            k = ev.key
+            confirm = k in (pygame.K_e, pygame.K_RETURN, pygame.K_SPACE)
+            if self.state == 'title':
+                if k == pygame.K_RETURN:
+                    self.text_lines, self.text_title = story.INTRO, "OCTOBER 9TH, 3:14 AM"
+                    self.text_next = 'controls_screen'
+                    self.set_state('text')
+            elif self.state == 'text':
+                if confirm and self.state_t > 0.6:
+                    if self.text_next == 'controls_screen':
+                        self.text_lines, self.text_title = story.CONTROLS, "SURVIVING THE STILLNESS"
+                        self.text_next = 'playing'
+                        self.set_state('text')
+                        self.banner_t = 0.0
+                    elif self.text_next == 'ending_choice':
+                        self.set_state('ending_choice')
+                    elif self.text_next == 'quit':
+                        pygame.quit()
+                        sys.exit()
+                    else:
+                        self.set_state('playing')
+            elif self.state == 'playing':
+                if k == pygame.K_SPACE:
+                    self.player.try_roll()
+                elif k == pygame.K_j:
+                    self.player.try_attack(False)
+                elif k == pygame.K_k:
+                    self.player.try_attack(True)
+                elif k == pygame.K_l:
+                    self.player.try_parry()
+                elif k == pygame.K_q:
+                    self.player.try_stim()
+                elif k == pygame.K_TAB:
+                    self.cycle_lock()
+                elif k == pygame.K_m:
+                    self.set_state('map')
+                elif k == pygame.K_ESCAPE:
+                    self.set_state('pause')
+                elif k == pygame.K_e:
+                    self.interact()
+            elif self.state == 'map':
+                if k in (pygame.K_m, pygame.K_ESCAPE):
+                    self.set_state('playing')
+            elif self.state == 'pause':
+                if k == pygame.K_ESCAPE:
+                    self.set_state('playing')
+                elif k == pygame.K_RETURN:
+                    self.set_state('playing')
+                elif k == pygame.K_q:
+                    pygame.quit()
+                    sys.exit()
+            elif self.state == 'dialogue':
+                if confirm:
+                    name, pages, idx = self.dialogue
+                    if idx + 1 < len(pages):
+                        self.dialogue = (name, pages, idx + 1)
+                    else:
+                        self.set_state('playing')
+            elif self.state == 'beacon':
+                if k in (pygame.K_w, pygame.K_UP):
+                    self.beacon_sel = (self.beacon_sel - 1) % 4
+                elif k in (pygame.K_s, pygame.K_DOWN):
+                    self.beacon_sel = (self.beacon_sel + 1) % 4
+                elif confirm:
+                    self.beacon_choose()
+                elif k == pygame.K_ESCAPE:
+                    self.set_state('playing')
+            elif self.state == 'boss_intro':
+                if confirm and self.state_t > 0.8 and self.player.alive:
+                    self.start_boss_fight()
+            elif self.state == 'dead':
+                if confirm and self.state_t > 1.2:
+                    self.respawn()
+            elif self.state == 'ending_choice':
+                if k in (pygame.K_w, pygame.K_UP, pygame.K_s, pygame.K_DOWN):
+                    self.ending_sel = 1 - self.ending_sel
+                elif confirm:
+                    self.text_lines = (story.ENDING_SEVER if self.ending_sel == 0
+                                       else story.ENDING_INHERIT)
+                    self.text_title = "THE LONGEST SECOND ENDS" if self.ending_sel == 0 \
+                        else "THE DREAM CONTINUES"
+                    self.text_next = 'quit'
+                    self.set_state('text')
 
-    def handle_input_dead(self, event):
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN:
-            if self.respawn_delay <= 0:
-                self.respawn()
+    # ------------------------------------------------------- interactions ---
+    def nearest_interactable(self):
+        px, py = self.player.x, self.player.y
+        best, best_d = None, 1.5
+        for bx, by, name in self.world.beacons:
+            d = dist(px, py, bx, by)
+            if d < best_d:
+                best, best_d = ('beacon', (bx, by, name)), d
+        for (x, y, key, style) in self.world.npcs:
+            d = dist(px, py, x, y)
+            if d < best_d:
+                best, best_d = ('npc', (x, y, key, style)), d
+        for item in self.world.lore:
+            x, y, idx = item
+            if idx in self.lore_found:
+                continue
+            d = dist(px, py, x, y)
+            if d < best_d:
+                best, best_d = ('lore', item), d
+        if self.echo:
+            d = dist(px, py, self.echo[0], self.echo[1])
+            if d < best_d:
+                best, best_d = ('echo', self.echo), d
+        return best
 
-    def handle_input_victory(self, event):
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_r:
-                self.start_ending('restore')
-            elif event.key == pygame.K_b:
-                self.start_ending('burn')
+    def interact(self):
+        it = self.nearest_interactable()
+        if not it:
+            return
+        kind, data = it
+        if kind == 'beacon':
+            bx, by, name = data
+            self.last_beacon = (bx, by)
+            self.player.rest()
+            self.spawn_enemies()      # resting revives the city
+            self.projectiles.clear()
+            self.reset_bosses()
+            self.beacon_sel = 0
+            self.beacon_msg = random.choice(story.GRACE_MESSAGES)
+            self.set_state('beacon')
+        elif kind == 'npc':
+            x, y, key, style = data
+            d = story.NPC_DIALOGUE[key]
+            prog = self.npc_progress.get(key, 0)
+            lines = d['lines'][min(prog, len(d['lines']) - 1)]
+            self.npc_progress[key] = prog + 1
+            pages = [lines[i:i + 3] for i in range(0, len(lines), 3)]
+            self.dialogue = (d['name'], pages, 0)
+            self.set_state('dialogue')
+        elif kind == 'lore':
+            x, y, idx = data
+            self.lore_found.add(idx)
+            title, lines = story.LORE_FRAGMENTS[idx]
+            self.text_lines, self.text_title = lines, title
+            self.text_next = 'playing'
+            self.set_state('text')
+            self.player.shards += 25
+        elif kind == 'echo':
+            self.player.shards += self.echo[2]
+            self.particles.death_burst(self.echo[0], self.echo[1])
+            self.flash(f"{self.echo[2]} shards reclaimed")
+            self.echo = None
 
-    def handle_input_ending(self, event):
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_RETURN:
-            pygame.quit()
-            sys.exit()
+    def beacon_choose(self):
+        cost = level_cost(self.player.level)
+        p = self.player
+        if self.beacon_sel == 3:
+            self.set_state('playing')
+            return
+        if p.shards < cost:
+            return
+        p.shards -= cost
+        p.level += 1
+        if self.beacon_sel == 0:
+            p.vigor += 1
+        elif self.beacon_sel == 1:
+            p.endurance += 1
+        else:
+            p.strength += 1
+        p.rest()
 
-    def show_area_name(self):
-        self.area_name_alpha = 255
-        self.area_name_timer = 240
+    def cycle_lock(self):
+        p = self.player
+        targets = [e for e in self.enemies if e.alive and dist(p.x, p.y, e.x, e.y) < 11]
+        if self.active_boss and self.active_boss.alive:
+            targets.append(self.active_boss)
+        targets.sort(key=lambda e: dist(p.x, p.y, e.x, e.y))
+        if not targets:
+            p.lock_target = None
+            return
+        if p.lock_target in targets:
+            i = targets.index(p.lock_target)
+            p.lock_target = targets[(i + 1) % len(targets)]
+        else:
+            p.lock_target = targets[0]
 
-    def show_pickup(self, text, duration=180):
-        self.pickup_text = text
-        self.pickup_timer = duration
+    # ------------------------------------------------------------ bosses ---
+    def reset_bosses(self):
+        for key, boss in self.bosses.items():
+            if key not in self.bosses_defeated:
+                c = self.world.bosses[key]['center']
+                boss.hp = boss.max_hp
+                boss.x, boss.y = c
+                boss.active = False
+                boss.alive = True
+                boss.phase2 = False
+                boss.state = 'idle'
+                boss.telegraphs.clear()
+        self.active_boss = None
+        self.enemies = [e for e in self.enemies if not getattr(e, 'summoned', False)]
 
-    def trigger_boss_intro(self):
-        self.state = GameState.BOSS_INTRO
-        self.boss_intro_lines = BOSS_INTRO.get(self.boss.boss_type, [self.boss.name])
-        self.boss_intro_timer = 240
+    def check_boss_triggers(self):
+        if self.active_boss is not None or not self.player.alive:
+            return
+        p = self.player
+        for key, boss in self.bosses.items():
+            if key in self.bosses_defeated or not boss.alive:
+                continue
+            bd = self.world.bosses[key]
+            if dist(p.x, p.y, *bd['center']) < bd['radius'] - 1.0:
+                self.pending_boss = key
+                self.set_state('boss_intro')
+                return
 
-    def start_ending(self, choice):
-        self.state = GameState.ENDING
-        self.ending_lines = ENDING_RESTORE if choice == 'restore' else ENDING_BURN
-        self.ending_alpha = 0
+    def start_boss_fight(self):
+        key = self.pending_boss
+        self.bosses[key].active = True
+        self.active_boss = self.bosses[key]
+        self.set_state('playing')
 
-    def respawn(self):
-        # Place rune pickup at death location
-        if self.player.lost_runes > 0 and self.player.lost_rune_pos:
-            self.rune_pickups.append(RunePickup(
-                self.player.lost_rune_pos[0],
-                self.player.lost_rune_pos[1],
-                self.player.lost_runes
-            ))
+    def on_boss_death(self, key):
+        boss = self.bosses[key]
+        boss.active = False
+        self.bosses_defeated.add(key)
+        self.player.shards += boss.shards
+        self.player.kills += 1
+        data = story.BOSS_DATA[key]
+        self.flash(data['defeat'], 5.0)
+        self.camera.shake(10, 0.5)
+        self.active_boss = None
+        if key == 'archivist':
+            self.text_lines = story.VICTORY_ARCHIVIST + [""] + story.ENDING_CHOICE
+            self.text_title = "THE TOP FLOOR"
+            self.text_next = 'ending_choice'
+            self.set_state('text')
+        elif not self.gate_open and {'warden', 'chorister'} <= self.bosses_defeated:
+            self.set_gate(True)
+            self.flash("Far north, the Helix Tower gate shudders open.", 5.0)
 
-        self.player = Player(10 * TILE_SIZE, 8 * TILE_SIZE)
-        self.death_fade = 0
-
-        # Respawn enemies killed in this session
-        self.enemies = [e for e in self.enemies if not e.dead]
-        # Respawn all enemies at their original counts via reload?
-        # For now keep survivors but reset boss if it died
-        if self.boss.dead:
-            bx, by = BOSS_SPAWN_OFFSETS[self.area_idx]
-            self.boss = Boss(bx, by, BOSS_TYPES[self.area_idx])
-
-        self.state = GameState.PLAYING
-        self.show_area_name()
-
-    def update_playing(self):
-        keys = pygame.key.get_pressed()
+    # ------------------------------------------------------------ update ---
+    def update(self, dt):
+        self.t += dt
+        self.state_t += dt
+        self.particles.update(dt)
+        self.flash_t = max(0, self.flash_t - dt)
+        if self.state != 'playing':
+            return
         p = self.player
 
-        if p.dead:
-            self.state = GameState.DEAD
-            self.death_fade = 0
-            self.respawn_delay = 120
-            return
+        keys = pygame.key.get_pressed()
+        mx = (keys[pygame.K_d] - keys[pygame.K_a])
+        my = (keys[pygame.K_s] - keys[pygame.K_w])
+        p.update(dt, self.world, (mx, my), keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
 
-        p.update(keys, self.walls)
-        self.camera.update(p.rect)
-        self.particles.update()
+        # area banner
+        area = district_at(int(p.x), int(p.y))
+        if area != self.area:
+            self.area = area
+            self.banner = (story.AREA_NAMES.get(area, ''), story.AREA_DESC.get(area, ''))
+            self.banner_t = 0.0
+        self.banner_t = min(1.0, self.banner_t + dt / 4.5)
 
-        # Update enemies
+        # gate bump message
+        if not self.gate_open:
+            for (gx, gy) in self.world.gate_tiles[::4]:
+                if dist(p.x, p.y, gx + 0.5, gy + 0.5) < 2.2 and self.flash_t <= 0:
+                    need = [k for k in ('warden', 'chorister') if k not in self.bosses_defeated]
+                    names = ' and '.join(story.BOSS_DATA[k]['name'] for k in need)
+                    self.flash(f"The Lattice denies you. It still grieves: {names}.", 3.5)
+
+        # enemies
         for e in self.enemies:
-            if not e.dead:
-                e.update(p, self.walls)
-            # Enemy attack hits player
-            ehb = e.get_attack_hitbox()
-            if ehb and p.rect.colliderect(ehb):
-                diff = p.pos - e.pos
-                if p.take_damage(e.dmg):
-                    self.particles.emit_blood(p.pos.x, p.pos.y)
+            if e.alive and dist(p.x, p.y, e.x, e.y) < 30:
+                e.update(dt, self.world, p, self.projectiles, self.particles)
 
-        # Update boss
-        if self.boss and not self.boss.dead:
-            self.boss.update(p, self.walls)
-            # Check boss aggro range for intro
-            dist = self.boss.pos.distance_to(p.pos)
-            if dist < 350 and not self.boss.aggro and self.state == GameState.PLAYING:
-                self.trigger_boss_intro()
-                self.boss.aggro = True
+        # bosses
+        self.check_boss_triggers()
+        if self.active_boss:
+            boss = self.active_boss
+            boss.update(dt, self.world, p, self.projectiles, self.particles, self.enemies)
+            # confine player to arena during the fight
+            key = self.pending_boss
+            bd = self.world.bosses[key]
+            d = dist(p.x, p.y, *bd['center'])
+            if d > bd['radius']:
+                nx = (bd['center'][0] - p.x) / d
+                ny = (bd['center'][1] - p.y) / d
+                p.x += nx * (d - bd['radius'])
+                p.y += ny * (d - bd['radius'])
+            if not boss.alive:
+                self.on_boss_death(key)
 
-            # Boss hitboxes hit player
-            for hb in self.boss.active_hitboxes:
-                if p.rect.colliderect(hb):
-                    atk = getattr(self.boss, 'current_atk', None)
-                    dmg = atk['dmg'] if atk else 20
-                    if p.take_damage(dmg):
-                        self.particles.emit_blood(p.pos.x, p.pos.y)
-
-            # Boss projectiles
-            for proj in self.boss.projectiles[:]:
-                pr = pygame.Rect(proj['x']-10, proj['y']-10, 20, 20)
-                if p.rect.colliderect(pr):
-                    if p.take_damage(proj['dmg']):
-                        self.particles.emit_blood(p.pos.x, p.pos.y)
-                    self.boss.projectiles.remove(proj)
-
-        # Player attack hits enemies
-        p_hb = p.get_attack_hitbox()
-        if p_hb:
+        # player attacks
+        if p.attack_active():
+            p.attack_hit_done = True
+            hit_any = False
             for e in self.enemies:
-                if not e.dead and id(e) not in p.hit_enemies:
-                    if p_hb.colliderect(e.rect):
-                        # Check parry
-                        if e.is_winding_up():
-                            pass  # Could parry enemy wind-ups too
-                        dmg = p.light_dmg if p.attack_type == 'light' else p.heavy_dmg
-                        if e.take_damage(dmg):
-                            p.hit_enemies.add(id(e))
-                            self.particles.emit_hit(e.pos.x, e.pos.y)
-                            if e.dead:
-                                p.runes += e.rune_reward
-                                self.particles.emit_death(e.pos.x, e.pos.y, (80, 200, 100))
+                if e.alive and p.in_arc(e.x, e.y, e.radius):
+                    gained = e.take_damage(p.attack_damage(), p.x, p.y, self.particles)
+                    hit_any = True
+                    if gained:
+                        p.shards += gained
+                        p.kills += 1
+                        self.flash(f"+{gained} shards", 1.2)
+            b = self.active_boss
+            if b and b.alive and p.in_arc(b.x, b.y, b.radius):
+                b.take_damage(p.attack_damage(), p.x, p.y, self.particles)
+                hit_any = True
+            if hit_any:
+                self.camera.shake(3, 0.1)
 
-            # Hit boss
-            if self.boss and not self.boss.dead and id(self.boss) not in p.hit_enemies:
-                if p_hb.colliderect(self.boss.rect):
-                    # Check if player is parrying and boss is attacking
-                    stagger = False
-                    if p.get_parry_active() and self.boss.is_winding_up():
-                        stagger = True
-                        self.parry_text_pos = (p.pos.x, p.pos.y)
-                        self.parry_text_timer = 60
-                        self.particles.emit_parry(p.pos.x, p.pos.y)
-                    dmg = p.light_dmg if p.attack_type == 'light' else p.heavy_dmg
-                    if self.boss.take_damage(dmg, stagger):
-                        p.hit_enemies.add(id(self.boss))
-                        self.particles.emit_hit(self.boss.pos.x, self.boss.pos.y)
-                        if self.boss.dead:
-                            self.particles.emit_death(self.boss.pos.x, self.boss.pos.y, GOLD, )
+        # projectiles
+        for pr in self.projectiles[:]:
+            if not pr.update(dt, self.world):
+                self.projectiles.remove(pr)
+                continue
+            if pr.hostile and dist(pr.x, pr.y, p.x, p.y) < pr.r + p.radius:
+                res = p.take_damage(pr.dmg)
+                if res in ('hit', 'dead', 'parried'):
+                    self.projectiles.remove(pr)
+                    if res == 'hit':
+                        self.particles.blood(p.x, p.y)
 
-        # Parry vs enemy wind-up
-        if p.get_parry_active():
-            for e in self.enemies:
-                if not e.dead and e.is_winding_up():
-                    if p.rect.inflate(60, 60).colliderect(e.rect):
-                        e.take_damage(0, stagger=True)
-                        e.attack_timer = 0
-                        self.parry_text_pos = (p.pos.x, p.pos.y)
-                        self.parry_text_timer = 60
-                        self.particles.emit_parry(p.pos.x, p.pos.y)
+        # shard echo proximity sparkle
+        if self.echo:
+            self.particles.shard_sparkle(self.echo[0], self.echo[1])
+        for bx, by, _ in self.world.beacons:
+            if dist(p.x, p.y, bx, by) < 14:
+                self.particles.beacon_idle(bx, by)
 
-        # Check grace interaction
-        for g in self.graces:
-            if p.rect.colliderect(g.rect.inflate(20, 20)):
-                if not g.lit:
-                    g.lit = True
-                    p.flasks = p.max_flasks
-                    p.hp = p.max_hp
-                    msg = random.choice(GRACE_MESSAGES)
-                    self.show_pickup(msg, 220)
-                    self.particles.emit_death(g.pos.x, g.pos.y, GOLD, 20)
-                self.particles.emit_grace(g.pos.x, g.pos.y)
+        self.camera.follow(p.x, p.y, dt)
 
-        # Check lore fragments
-        for lf in self.lore_fragments:
-            if not lf.collected and p.rect.colliderect(lf.rect.inflate(20, 20)):
-                lf.collected = True
-                lines = LORE_FRAGMENTS.get(lf.key, ["A strange inscription..."])
-                self.lore_lines = lines
-                self.state = GameState.LORE
+        # death
+        if not p.alive and self.state == 'playing':
+            self.echo = (p.x, p.y, p.shards) if p.shards > 0 else self.echo
+            p.shards = 0
+            self.death_msg = random.choice(story.DEATH_MESSAGES)
+            self.set_state('dead')
 
-        # Check rune pickups
-        for rp in self.rune_pickups[:]:
-            if not rp.collected and p.rect.colliderect(rp.rect.inflate(10, 10)):
-                rp.collected = True
-                p.runes += rp.amount
-                self.show_pickup(f"Recovered {rp.amount} Runes", 180)
-                self.particles.emit_hit(rp.pos.x, rp.pos.y, (80, 220, 120))
+    def respawn(self):
+        self.player.respawn(*self.last_beacon)
+        self.spawn_enemies()
+        self.projectiles.clear()
+        self.reset_bosses()
+        self.camera = Camera(self.player.x, self.player.y)
+        self.set_state('playing')
 
-        # Check boss death -> next area or victory
-        if self.boss and self.boss.dead and self.boss.death_timer <= 0:
-            if self.area_idx < 2:
-                self.area_idx += 1
-                saved_runes = p.runes
-                self.load_area(self.area_idx)
-                self.player.runes = saved_runes
-                self.show_pickup(f"Entering {AREA_NAMES[self.area_idx]}...", 240)
-                self.show_area_name()
-            else:
-                self.state = GameState.VICTORY
-
-        # Area name fade
-        if self.area_name_timer > 0:
-            self.area_name_timer -= 1
-            self.area_name_alpha = min(255, self.area_name_alpha)
-            if self.area_name_timer < 60:
-                self.area_name_alpha = int(255 * self.area_name_timer / 60)
-
-        # Pickup text fade
-        if self.pickup_timer > 0:
-            self.pickup_timer -= 1
-
-        # Parry text
-        if self.parry_text_timer > 0:
-            self.parry_text_timer -= 1
-
-    def render_playing(self):
-        cam_ox = int(self.camera.offset.x)
-        cam_oy = int(self.camera.offset.y)
-
-        # Background
-        self.screen.fill((18, 16, 14))
-
-        # Tiles
-        draw_tiles(self.screen, self.tiles, cam_ox, cam_oy)
-
-        # Decorations (behind entities)
-        for d in self.decorations:
-            d.draw(self.screen, cam_ox, cam_oy)
-
-        # Graces
-        for g in self.graces:
-            g.draw(self.screen, cam_ox, cam_oy)
-
-        # Lore fragments
-        for lf in self.lore_fragments:
-            lf.draw(self.screen, cam_ox, cam_oy)
-
-        # Rune pickups
-        for rp in self.rune_pickups:
-            rp.draw(self.screen, cam_ox, cam_oy)
-
-        # Enemies
-        for e in self.enemies:
-            e.draw(self.screen, cam_ox, cam_oy)
-
-        # Boss
-        if self.boss:
-            self.boss.draw(self.screen, cam_ox, cam_oy)
-
-        # Player
-        self.player.draw(self.screen, cam_ox, cam_oy)
-
-        # Particles
-        self.particles.draw(self.screen, cam_ox, cam_oy)
-
-        # Parry text
-        if self.parry_text_timer > 0 and self.parry_text_pos:
-            draw_parry_success(self.screen,
-                               self.parry_text_pos[0], self.parry_text_pos[1],
-                               cam_ox, cam_oy)
-
-        # HUD
-        draw_hud(self.screen, self.player)
-        draw_boss_bar(self.screen, self.boss)
-
-        # Area name
-        if self.area_name_timer > 0:
-            draw_area_name(self.screen, AREA_NAMES[self.area_idx], self.area_name_alpha)
-
-        # Pickup text
-        if self.pickup_timer > 0:
-            draw_pickup_text(self.screen, self.pickup_text, self.pickup_timer)
-
-    def run(self):
-        running = True
-        while running:
-            self.frame += 1
-            dt = self.clock.tick(FPS) / (1000 / FPS)
-
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                elif self.state in (GameState.INTRO, GameState.CONTROLS,
-                                     GameState.LORE, GameState.BOSS_INTRO):
-                    self.handle_input_intro(event)
-                elif self.state == GameState.PLAYING:
-                    self.handle_input_game(event)
-                elif self.state == GameState.DEAD:
-                    self.handle_input_dead(event)
-                elif self.state == GameState.VICTORY:
-                    self.handle_input_victory(event)
-                elif self.state == GameState.ENDING:
-                    self.handle_input_ending(event)
-
-            # Update
-            if self.state == GameState.PLAYING:
-                self.update_playing()
-            elif self.state == GameState.DEAD:
-                self.respawn_delay = max(0, self.respawn_delay - 1)
-                self.death_fade = min(255, self.death_fade + 4)
-                self.particles.update()
-            elif self.state == GameState.BOSS_INTRO:
-                self.boss_intro_timer -= 1
-                if self.boss_intro_timer <= 0:
-                    self.state = GameState.PLAYING
-            elif self.state == GameState.ENDING:
-                self.ending_alpha = min(255, self.ending_alpha + 2)
-
-            # Render
-            self.screen.fill((8, 8, 10))
-
-            if self.state == GameState.INTRO:
-                self.text_alpha = min(255, self.text_alpha + 3)
-                draw_text_screen(self.screen, self.text_lines, alpha=self.text_alpha)
-
-            elif self.state == GameState.CONTROLS:
-                draw_text_screen(self.screen, self.text_lines, alpha=255)
-
-            elif self.state == GameState.PLAYING:
-                self.render_playing()
-
-            elif self.state == GameState.BOSS_INTRO:
-                self.render_playing()
-                a = min(255, int(255 * (1 - self.boss_intro_timer / 240)) * 2)
-                draw_text_screen(self.screen, self.boss_intro_lines, font_size=20, title_size=36, alpha=min(255, a))
-
-            elif self.state == GameState.DEAD:
-                self.render_playing()
-                overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-                overlay.fill((60, 0, 0, int(self.death_fade * 0.7)))
-                self.screen.blit(overlay, (0, 0))
-                if self.death_fade > 120:
-                    draw_status_text(self.screen, "YOU DIED", min(255, (self.death_fade - 120) * 4))
-                    if self.respawn_delay <= 0:
-                        hint = pygame.font.SysFont('monospace', 18).render("Press ENTER to rise again", True, (180, 140, 140))
-                        self.screen.blit(hint, (WIDTH//2 - hint.get_width()//2, HEIGHT//2 + 50))
-
-            elif self.state == GameState.GRACE:
-                self.render_playing()
-
-            elif self.state == GameState.LORE:
-                self.render_playing()
-                draw_text_screen(self.screen, self.lore_lines + ['', '— Press ENTER —'], alpha=230)
-
-            elif self.state == GameState.VICTORY:
-                self.render_playing()
-                draw_text_screen(self.screen, VICTORY_TEXT, font_size=18, title_size=28, alpha=230)
-
-            elif self.state == GameState.ENDING:
-                draw_text_screen(self.screen, self.ending_lines + ['', '— Press ENTER to exit —'],
-                                 font_size=20, title_size=30, alpha=int(self.ending_alpha))
-
+    # ------------------------------------------------------------ render ---
+    def render(self):
+        s = self.screen
+        if self.state == 'title':
+            ui.draw_title(s, self.t)
             pygame.display.flip()
+            return
+        s.fill(C_BG)
+        ox, oy = self.camera.offset()
+        self.draw_world(s, ox, oy)
+        self.particles.draw_world(s, ox, oy)
+        self.particles.draw_rain(s)
+        s.blit(self.vignette, (0, 0))
 
-        pygame.quit()
+        # HUD layer
+        p = self.player
+        if self.state in ('playing', 'dialogue', 'boss_intro', 'beacon', 'dead'):
+            ui.draw_hud(s, p, story.AREA_NAMES.get(self.area, ''))
+            if self.banner_t < 1.0:
+                ui.draw_banner(s, *self.banner, self.banner_t)
+            if self.active_boss and self.active_boss.alive:
+                ui.draw_boss_bar(s, self.active_boss,
+                                 story.BOSS_DATA[self.pending_boss]['name'])
+            if p.lock_target is not None and getattr(p.lock_target, 'alive', False):
+                tx, ty = world_to_screen(p.lock_target.x, p.lock_target.y, 30)
+                ui.draw_lock_marker(s, tx + ox, ty + oy, self.t)
+            if p.parry_success_t > 0:
+                ui.draw_center_flash(s, "PARRY!", C_ACCENT)
+            if self.flash_t > 0 and self.flash_msg:
+                ui.text(s, self.flash_msg, WIDTH // 2, HEIGHT - 40, ui.F_MED,
+                        C_ACCENT2, center=True)
+            if self.state == 'playing':
+                it = self.nearest_interactable()
+                if it:
+                    labels = {'beacon': "E — rest at the relay beacon",
+                              'npc': "E — talk",
+                              'lore': "E — read",
+                              'echo': "E — reclaim your shards"}
+                    ui.draw_prompt(s, labels[it[0]])
+
+        if self.state == 'text':
+            ui.draw_text_screen(s, self.text_lines, self.text_title,
+                                t=min(1.0, self.state_t / 1.2))
+        elif self.state == 'dialogue':
+            name, pages, idx = self.dialogue
+            ui.draw_dialogue(s, name, pages[idx], True)
+        elif self.state == 'beacon':
+            ui.draw_beacon_menu(s, p, self.beacon_sel, self.beacon_msg)
+        elif self.state == 'map':
+            ui.draw_map(s, self.world, p, self.bosses_defeated)
+        elif self.state == 'boss_intro':
+            bd = story.BOSS_DATA[self.pending_boss]
+            ui.overlay(s, 170)
+            ui.text(s, bd['name'], WIDTH // 2, 200, ui.F_BIG, C_BOSS, center=True)
+            ui.text(s, bd['sub'], WIDTH // 2, 244, ui.F_MED, C_TEXT_DIM, center=True)
+            for i, line in enumerate(bd['intro']):
+                ui.text(s, line, WIDTH // 2, 320 + i * 28, ui.F_MED, C_TEXT, center=True)
+            if self.state_t > 0.8:
+                ui.text(s, "E — face them", WIDTH // 2, HEIGHT - 90, ui.F_MED,
+                        C_DANGER, center=True)
+        elif self.state == 'dead':
+            ui.draw_death(s, self.death_msg, self.state_t)
+        elif self.state == 'pause':
+            ui.overlay(s, 170)
+            ui.text(s, "PAUSED", WIDTH // 2, 240, ui.F_BIG, C_TEXT, center=True)
+            for i, line in enumerate(story.CONTROLS):
+                ui.text(s, line, WIDTH // 2, 300 + i * 24, ui.F_SMALL, C_TEXT_DIM, center=True)
+            ui.text(s, "ESC — resume    Q — quit", WIDTH // 2, HEIGHT - 80,
+                    ui.F_MED, C_ACCENT, center=True)
+        elif self.state == 'ending_choice':
+            ui.draw_ending_choice(s, story.ENDING_CHOICE, self.ending_sel)
+
+        pygame.display.flip()
+
+    def draw_world(self, s, ox, oy):
+        w = self.world
+        # visible world-rect from screen corners
+        corners = [screen_to_world(-ox + cx, -oy + cy)
+                   for cx, cy in ((0, 0), (WIDTH, 0), (0, HEIGHT), (WIDTH, HEIGHT))]
+        x0 = max(0, int(min(c[0] for c in corners)) - 2)
+        x1 = min(w.w, int(max(c[0] for c in corners)) + 3)
+        y0 = max(0, int(min(c[1] for c in corners)) - 2)
+        y1 = min(w.h, int(max(c[1] for c in corners)) + 9)
+
+        # ground pass
+        wave = self.t * 1.5
+        for ty in range(y0, y1):
+            row = w.ground[ty]
+            for tx in range(x0, x1):
+                sx, sy = world_to_screen(tx, ty)
+                sx += ox
+                sy += oy
+                if sx < -TILE_W or sx > WIDTH or sy < -TILE_H or sy > HEIGHT + TILE_H:
+                    continue
+                kind = row[tx]
+                variant = (tx * 7 + ty * 13) % 4
+                if kind == 'water':
+                    variant = int(wave + (tx + ty) * 0.5) % 4
+                img, (ax, ay) = assets.ground_tile(kind, variant)
+                s.blit(img, (sx, sy))
+                dec = w.decals.get((tx, ty))
+                if dec:
+                    dimg, _ = assets.road_marking(dec)
+                    s.blit(dimg, (sx, sy))
+
+        # boss telegraphs (flat on ground)
+        if self.active_boss:
+            for tg in self.active_boss.telegraphs:
+                sx, sy = world_to_screen(tg.x, tg.y)
+                frac = 1.0 - tg.t / tg.total
+                rw, rh = tg.r * TILE_W, tg.r * TILE_H
+                rect = pygame.Rect(sx + ox - rw, sy + oy - rh, rw * 2, rh * 2)
+                surf_tg = pygame.Surface(rect.size, pygame.SRCALPHA)
+                pygame.draw.ellipse(surf_tg, (255, 60, 50, 40 + int(60 * frac)),
+                                    surf_tg.get_rect())
+                pygame.draw.ellipse(surf_tg, (255, 80, 60, 180), surf_tg.get_rect(), 2)
+                s.blit(surf_tg, rect.topleft)
+
+        # depth-sorted entity pass
+        drawables = []   # (depth, surf, x, y)
+
+        def add(img_anchor, wx, wy, z=0.0, depth_bias=0.0):
+            img, (ax, ay) = img_anchor
+            sx, sy = world_to_screen(wx, wy, z)
+            drawables.append((wx + wy + depth_bias, img, sx + ox - ax, sy + oy - ay))
+
+        px, py = self.player.x, self.player.y
+        view_r = 26
+        for b in w.buildings:
+            if abs(b.x - px) < view_r + b.fw and abs(b.y - py) < view_r + b.fh:
+                add(assets.building(b.seed, b.fw, b.fh, b.stories, b.style),
+                    b.x, b.y, depth_bias=b.fw + b.fh - 1)
+        for pr in w.props:
+            if abs(pr.x - px) < view_r and abs(pr.y - py) < view_r:
+                if pr.kind == 'car':
+                    add(assets.car(pr.seed, pr.axis), pr.x, pr.y)
+                else:
+                    add(assets.prop(pr.kind, pr.variant), pr.x, pr.y)
+        for bx, by, name in w.beacons:
+            if abs(bx - px) < view_r and abs(by - py) < view_r:
+                add(assets.prop('beacon'), bx, by)
+        for (x, y, idx) in w.lore:
+            if idx not in self.lore_found and abs(x - px) < view_r and abs(y - py) < view_r:
+                add(assets.prop('lore'), x, y)
+        if self.echo and abs(self.echo[0] - px) < view_r and abs(self.echo[1] - py) < view_r:
+            add(assets.prop('shard_echo'), self.echo[0], self.echo[1])
+        for (x, y, key, style) in w.npcs:
+            if abs(x - px) < view_r and abs(y - py) < view_r:
+                add(assets.character(style, 2, 0), x, y)
+        for e in self.enemies:
+            if e.alive and abs(e.x - px) < view_r and abs(e.y - py) < view_r:
+                img, anchor = assets.character(e.style, e.octant(), e.anim_frame())
+                if e.hit_flash > 0:
+                    img = img.copy()
+                    img.fill((90, 30, 30, 0), special_flags=pygame.BLEND_RGBA_ADD)
+                add((img, anchor), e.x, e.y)
+        for key, boss in self.bosses.items():
+            if boss.alive and abs(boss.x - px) < view_r and abs(boss.y - py) < view_r:
+                img, anchor = assets.character(boss.style, boss.octant(), boss.anim_frame())
+                if boss.hit_flash > 0:
+                    img = img.copy()
+                    img.fill((90, 30, 30, 0), special_flags=pygame.BLEND_RGBA_ADD)
+                add((img, anchor), boss.x, boss.y)
+
+        # player (with roll tilt + attack slash)
+        p = self.player
+        if p.alive or self.state == 'dead':
+            img, anchor = assets.character('player', p.octant(), p.anim_frame())
+            if p.state == 'roll':
+                img = pygame.transform.rotate(img, 28 if p.roll_dx - p.roll_dy > 0 else -28)
+                anchor = (img.get_width() // 2, img.get_height() - 6)
+            if p.state == 'stim':
+                img = img.copy()
+                img.fill((20, 60, 20, 0), special_flags=pygame.BLEND_RGBA_ADD)
+            if p.hit_iframes > 0 and int(self.t * 20) % 2 == 0:
+                img = img.copy()
+                img.set_alpha(120)
+            add((img, anchor), p.x, p.y)
+
+        # projectiles
+        for pr in self.projectiles:
+            sx, sy = world_to_screen(pr.x, pr.y, 22)
+            drawables.append((pr.x + pr.y, None, sx + ox, sy + oy, pr.color))
+
+        drawables.sort(key=lambda d: d[0])
+        for d in drawables:
+            if d[1] is None:
+                _, _, sx, sy, color = d
+                pygame.draw.circle(s, color, (int(sx), int(sy)), 5)
+                pygame.draw.circle(s, (255, 255, 255), (int(sx), int(sy)), 2)
+            else:
+                s.blit(d[1], (d[2], d[3]))
+
+        # attack slash arc on top
+        if p.attack_active() or (p.state in ('attack', 'heavy') and p.attack_hit_done
+                                 and p.timer > (LIGHT_RECOVER if p.state == 'attack'
+                                                else HEAVY_RECOVER) - 0.12):
+            sx, sy = world_to_screen(p.x + p.fx * 0.9, p.y + p.fy * 0.9, 24)
+            ang = math.atan2(-(p.fx + p.fy) * 0.5, (p.fx - p.fy))
+            color = C_ACCENT if p.state == 'attack' else C_ACCENT2
+            img, (ax, ay) = assets.slash_arc(34, color)
+            img = pygame.transform.rotate(img, math.degrees(ang))
+            r = img.get_rect(center=(sx + ox, sy + oy))
+            s.blit(img, r)
+
+        # parry shimmer
+        if p.parry_active > 0:
+            sx, sy = world_to_screen(p.x + p.fx * 0.5, p.y + p.fy * 0.5, 26)
+            pygame.draw.circle(s, C_ACCENT, (int(sx + ox), int(sy + oy)), 14, 2)
+
+        # fog gate
+        if not self.gate_open:
+            for (gx, gy) in w.gate_tiles:
+                sx, sy = world_to_screen(gx, gy)
+                sx += ox
+                sy += oy
+                if -TILE_W < sx < WIDTH and -100 < sy < HEIGHT + 60:
+                    hgt = 70
+                    fog = pygame.Surface((TILE_W, TILE_H + hgt), pygame.SRCALPHA)
+                    pulse = 30 + int(20 * math.sin(self.t * 2 + gx))
+                    pts = assets.diamond_points(0, hgt)
+                    pygame.draw.polygon(fog, (90, 200, 255, pulse),
+                                        [(pts[3][0], pts[3][1] - hgt), (pts[1][0], pts[1][1] - hgt),
+                                         pts[1], pts[3]])
+                    pygame.draw.line(fog, (140, 230, 255, 90),
+                                     (pts[3][0], pts[3][1] - hgt), (pts[1][0], pts[1][1] - hgt), 2)
+                    s.blit(fog, (sx, sy - hgt + 0))
+
+    # -------------------------------------------------------------- run ---
+    def run(self):
+        while True:
+            dt = min(0.05, self.clock.tick(FPS) / 1000.0)
+            self.handle_events()
+            self.update(dt)
+            self.render()
 
 
 if __name__ == '__main__':
-    game = Game()
-    game.run()
+    Game().run()
