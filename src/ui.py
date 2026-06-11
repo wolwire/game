@@ -1,262 +1,249 @@
-import pygame
+"""All HUD and screen-level UI: bars, banners, dialogue, beacon menu,
+minimap, text screens."""
 import math
-from .constants import *
-from .particles import draw_glow
+import pygame
+from src.constants import *
+
+pygame.font.init()
+F_SMALL = pygame.font.SysFont('dejavusansmono', 14)
+F_MED = pygame.font.SysFont('dejavusansmono', 18)
+F_BIG = pygame.font.SysFont('dejavusansmono', 30, bold=True)
+F_TITLE = pygame.font.SysFont('dejavusansmono', 56, bold=True)
 
 
-_font_cache = {}
-def get_font(size, bold=True):
-    key = (size, bold)
-    if key not in _font_cache:
-        _font_cache[key] = pygame.font.SysFont('monospace', size, bold=bold)
-    return _font_cache[key]
+def text(surf, s, x, y, font=F_MED, color=C_TEXT, center=False, shadow=True):
+    img = font.render(s, True, color)
+    r = img.get_rect()
+    if center:
+        r.center = (x, y)
+    else:
+        r.topleft = (x, y)
+    if shadow:
+        sh = font.render(s, True, (0, 0, 0))
+        surf.blit(sh, (r.x + 1, r.y + 2))
+    surf.blit(img, r)
+    return r
 
 
-def draw_bar(surface, x, y, w, h, value, max_val, color, bg=(20,16,14)):
-    # Background
-    pygame.draw.rect(surface, bg, (x-1, y-1, w+2, h+2), border_radius=3)
-    pygame.draw.rect(surface, tuple(max(0,c-6) for c in bg), (x, y, w, h), border_radius=2)
-    if max_val > 0 and value > 0:
-        fill = max(1, int(w * value / max_val))
-        # Main fill
-        pygame.draw.rect(surface, color, (x, y, fill, h), border_radius=2)
-        # Shimmer highlight on top
-        hl = tuple(min(255,c+50) for c in color)
-        pygame.draw.rect(surface, hl, (x, y, fill, max(1,h//3)), border_radius=2)
-    # Tick marks
-    for pct in [0.25, 0.5, 0.75]:
-        tx = x + int(w * pct)
-        pygame.draw.line(surface, (0,0,0), (tx, y), (tx, y+h), 1)
-    # Border
-    pygame.draw.rect(surface, (60,55,50), (x-1, y-1, w+2, h+2), border_radius=3, width=1)
+def bar(surf, x, y, w, h, frac, color, bg, border=(20, 22, 26)):
+    pygame.draw.rect(surf, bg, (x, y, w, h))
+    if frac > 0:
+        pygame.draw.rect(surf, color, (x, y, int(w * max(0.0, min(1.0, frac))), h))
+    pygame.draw.rect(surf, border, (x, y, w, h), 2)
 
 
-def draw_hud(surface, player):
-    # Vignette
-    vignette = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-    for r in range(min(WIDTH,HEIGHT)//2, 0, -20):
-        a = max(0, int(80 * (1 - r / (min(WIDTH,HEIGHT)//2))**2))
-        pygame.draw.circle(vignette, (0,0,0,a), (WIDTH//2, HEIGHT//2), r+20)
-    surface.blit(vignette, (0,0))
-
-    # HUD panel background
-    panel_w, panel_h = 300, 108
-    px, py = 18, HEIGHT - panel_h - 14
-    panel = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-    panel.fill((0,0,0,0))
-    pygame.draw.rect(panel, (0,0,0,160), (0,0,panel_w,panel_h), border_radius=6)
-    # Gold border
-    pygame.draw.rect(panel, (212,175,55,100), (0,0,panel_w,panel_h), border_radius=6, width=1)
-    surface.blit(panel, (px-4, py-4))
-
-    # HP bar
-    font_sm = get_font(14)
-    draw_bar(surface, px, py+2, 260, 18, player.hp, player.max_hp,
-             (200,35,35), bg=(40,10,10))
-    hp_txt = font_sm.render(f"HP  {player.hp}/{player.max_hp}", True, (240,220,210))
-    surface.blit(hp_txt, (px+6, py+3))
-
-    # Stamina bar
-    draw_bar(surface, px, py+28, 260, 14, player.stamina, player.max_stamina,
-             (45,185,80), bg=(10,30,15))
-    st_txt = get_font(13).render(f"STA {int(player.stamina)}/{player.max_stamina}", True, (200,240,200))
-    surface.blit(st_txt, (px+6, py+29))
-
-    # Flask icons
-    fy = py + 52
-    fl_label = get_font(13).render("Flask", True, GOLD)
-    surface.blit(fl_label, (px, fy))
-    for i in range(player.max_flasks):
-        fx2 = px + 56 + i*30
-        if i < player.flasks:
-            draw_glow(surface, fx2+10, fy+10, 14, (60,140,220), 50)
-            pygame.draw.rect(surface, (20,50,90), (fx2, fy, 20, 20), border_radius=4)
-            pygame.draw.rect(surface, (60,140,220), (fx2, fy, 20, 20), border_radius=4)
-            # Flask shape
-            pygame.draw.rect(surface, (40,110,180), (fx2+3, fy+3, 14, 14), border_radius=3)
-            pygame.draw.circle(surface, (120,200,255), (fx2+10, fy+8), 4)
-            pygame.draw.rect(surface, (80,160,220), (fx2+1, fy+1, 18, 18), border_radius=4, width=1)
-        else:
-            pygame.draw.rect(surface, (30,30,35), (fx2, fy, 20, 20), border_radius=4)
-            pygame.draw.rect(surface, (50,50,60), (fx2, fy, 20, 20), border_radius=4, width=1)
-            pygame.draw.line(surface, (60,60,70), (fx2+4,fy+10),(fx2+16,fy+10), 2)
-
-    # Rune counter (top left, styled)
-    rune_panel = pygame.Surface((180, 32), pygame.SRCALPHA)
-    pygame.draw.rect(rune_panel, (0,0,0,150), (0,0,180,32), border_radius=4)
-    pygame.draw.rect(rune_panel, (80,200,100,80), (0,0,180,32), border_radius=4, width=1)
-    surface.blit(rune_panel, (px-4, py-42))
-    draw_glow(surface, px+12, py-28, 10, (80,200,100), 60)
-    pygame.draw.circle(surface, (50,180,80), (px+12, py-28), 8)
-    pygame.draw.circle(surface, (120,240,150), (px+12, py-28), 4)
-    rune_font = get_font(18)
-    rune_txt = rune_font.render(f"{player.runes:,}", True, (120,240,150))
-    surface.blit(rune_txt, (px+26, py-38))
-
-    # Stagger/hurt indicator
-    if player.stagger_timer > 0:
-        stag = get_font(16).render("STAGGERED", True, (255,80,80))
-        surface.blit(stag, (px, py-62))
-
-    # Controls bar (bottom center)
-    hints = [("Z","Light"),("X","Heavy"),("Space","Roll"),("Q","Parry"),("Shift","Block"),("F","Flask")]
-    ctrl_panel_w = 620
-    ctrl_panel = pygame.Surface((ctrl_panel_w, 26), pygame.SRCALPHA)
-    pygame.draw.rect(ctrl_panel, (0,0,0,130), (0,0,ctrl_panel_w,26), border_radius=4)
-    surface.blit(ctrl_panel, (WIDTH//2 - ctrl_panel_w//2, HEIGHT-28))
-    cx = WIDTH//2 - ctrl_panel_w//2 + 8
-    font_k = get_font(12)
-    font_l = get_font(11, bold=False)
-    for key, label in hints:
-        k = font_k.render(f"[{key}]", True, GOLD)
-        l = font_l.render(label, True, (160,155,145))
-        surface.blit(k, (cx, HEIGHT-24))
-        surface.blit(l, (cx + k.get_width()+2, HEIGHT-24))
-        cx += k.get_width() + l.get_width() + 14
+def draw_hud(surf, player, area_name):
+    bar(surf, 24, 22, 280 * (player.max_hp / 240), 16, player.hp / player.max_hp, C_HP, C_HP_BG)
+    bar(surf, 24, 44, 240 * (player.max_stamina / 200), 12,
+        player.stamina / player.max_stamina, C_STAM, C_STAM_BG)
+    # stims
+    for i in range(player.stim_max):
+        col = C_ACCENT2 if i < player.stims else (50, 48, 44)
+        pygame.draw.rect(surf, col, (24 + i * 22, 64, 16, 20), border_radius=4)
+        pygame.draw.rect(surf, (20, 20, 22), (24 + i * 22, 64, 16, 20), 2, border_radius=4)
+    text(surf, 'Q', 24 + player.stim_max * 22 + 6, 66, F_SMALL, C_TEXT_DIM)
+    # shards
+    pygame.draw.circle(surf, C_SHARD, (38, 106), 7)
+    pygame.draw.circle(surf, (230, 245, 255), (38, 106), 3)
+    text(surf, f"{player.shards}", 52, 96, F_MED, C_SHARD)
+    text(surf, f"LV {player.level}", 52, 116, F_SMALL, C_TEXT_DIM)
+    # weapon slot
+    w = player.weapon
+    pygame.draw.rect(surf, (16, 18, 24, 200), (24, HEIGHT - 64, 230, 40), border_radius=6)
+    pygame.draw.rect(surf, (60, 68, 84), (24, HEIGHT - 64, 230, 40), 2, border_radius=6)
+    text(surf, w['name'], 38, HEIGHT - 58, F_MED, C_TEXT)
+    if len(player.inventory) > 1:
+        text(surf, f"[{player.weapon_idx + 1}/{len(player.inventory)}]  R — switch",
+             38, HEIGHT - 38, F_SMALL, C_TEXT_DIM)
+    else:
+        text(surf, w['desc'], 38, HEIGHT - 38, F_SMALL, C_TEXT_DIM)
+    # area
+    img = F_MED.render(area_name, True, C_TEXT_DIM)
+    surf.blit(img, (WIDTH - img.get_width() - 24, 20))
 
 
-def draw_boss_bar(surface, boss):
-    if not boss or boss.dead or not boss.aggro:
+def draw_boss_bar(surf, boss, name):
+    w = 640
+    x = (WIDTH - w) // 2
+    y = HEIGHT - 86
+    text(surf, name, WIDTH // 2, y - 14, F_MED, C_BOSS, center=True)
+    bar(surf, x, y, w, 14, boss.hp / boss.max_hp, C_BOSS, (50, 40, 18))
+
+
+def draw_prompt(surf, s):
+    text(surf, s, WIDTH // 2, HEIGHT - 140, F_MED, C_ACCENT, center=True)
+
+
+def draw_banner(surf, title, sub, t):
+    """Area-name banner, fades with t in [0,1]."""
+    a = min(1.0, t * 4) if t < 0.75 else max(0.0, (1.0 - t) * 4)
+    if a <= 0:
         return
-
-    bar_w = 720
-    bx = WIDTH//2 - bar_w//2
-    by = 18
-
-    # Panel
-    panel = pygame.Surface((bar_w+28, 58), pygame.SRCALPHA)
-    pygame.draw.rect(panel, (0,0,0,180), (0,0,bar_w+28,58), border_radius=5)
-    pygame.draw.rect(panel, (180,20,20,80), (0,0,bar_w+28,58), border_radius=5, width=1)
-    surface.blit(panel, (bx-14,by-8))
-
-    # Boss name
-    font = get_font(18)
-    name_txt = font.render(boss.name, True, GOLD)
-    surface.blit(name_txt, (WIDTH//2 - name_txt.get_width()//2, by-4))
-
-    # HP bar
-    draw_bar(surface, bx, by+22, bar_w, 14, boss.hp, boss.max_hp,
-             (200,45,20), bg=(50,10,10))
-    # Segment lines (10% increments)
-    for pct in [i*0.1 for i in range(1,10)]:
-        tx = bx + int(bar_w * pct)
-        pygame.draw.line(surface, (0,0,0), (tx,by+22),(tx,by+36), 2)
-
-    # HP text
-    hp_pct = int(boss.hp / boss.max_hp * 100)
-    hp_f = get_font(12).render(f"{boss.hp}/{boss.max_hp}", True, (200,180,160))
-    surface.blit(hp_f, (WIDTH//2 - hp_f.get_width()//2, by+24))
-
-    if boss.enraged:
-        txt = get_font(13).render("☩ ENRAGED ☩", True, (255,70,30))
-        surface.blit(txt, (WIDTH//2 - txt.get_width()//2, by+40))
-        draw_glow(surface, WIDTH//2, by+46, 60, (255,60,20), 40)
-
-    if boss.phase_transition:
-        prog = 1 - boss.phase_transition_timer/120
-        flash_a = int(math.sin(prog*math.pi*3)*80+80)
-        flash = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        flash.fill((200,80,20,flash_a))
-        surface.blit(flash, (0,0))
-        txt = get_font(28).render("PHASE TRANSITION", True, GOLD)
-        s2 = pygame.Surface((txt.get_width()+20,txt.get_height()+10), pygame.SRCALPHA)
-        s2.fill((0,0,0,160))
-        s2.blit(txt,(10,5))
-        s2.set_alpha(flash_a*2)
-        surface.blit(s2, (WIDTH//2-s2.get_width()//2, HEIGHT//2-s2.get_height()//2))
+    img = F_BIG.render(title, True, C_TEXT)
+    img.set_alpha(int(255 * a))
+    surf.blit(img, img.get_rect(center=(WIDTH // 2, 150)))
+    if sub:
+        img2 = F_SMALL.render(sub, True, C_TEXT_DIM)
+        img2.set_alpha(int(255 * a))
+        surf.blit(img2, img2.get_rect(center=(WIDTH // 2, 184)))
 
 
-def draw_status_text(surface, text, alpha, y_offset=0):
-    font = get_font(60)
-    txt = font.render(text, True, (220,60,60))
-    shadow = font.render(text, True, (60,10,10))
-    x = WIDTH//2 - txt.get_width()//2
-    y = HEIGHT//2 - txt.get_height()//2 + y_offset
-    s = pygame.Surface((txt.get_width()+40,txt.get_height()+20), pygame.SRCALPHA)
-    s.fill((0,0,0,0))
-    # Drop shadow
-    s.blit(shadow, (22,12))
-    s.blit(txt, (20,10))
-    s.set_alpha(int(alpha))
-    surface.blit(s, (x-20, y-10))
+def draw_center_flash(surf, s, color=C_ACCENT):
+    text(surf, s, WIDTH // 2, HEIGHT // 2 - 120, F_BIG, color, center=True)
 
 
-def draw_area_name(surface, name, alpha):
-    font = get_font(30)
-    txt = font.render(name, True, GOLD)
-    shadow = font.render(name, True, (80,60,20))
-    panel = pygame.Surface((txt.get_width()+40, txt.get_height()+14), pygame.SRCALPHA)
-    panel.fill((0,0,0,140))
-    panel.blit(shadow, (22,8))
-    panel.blit(txt, (20,6))
-    pygame.draw.rect(panel, (212,175,55,80), (0,0,panel.get_width(),panel.get_height()), width=1, border_radius=4)
-    panel.set_alpha(int(alpha))
-    surface.blit(panel, (WIDTH//2 - panel.get_width()//2, HEIGHT - 90))
+def overlay(surf, alpha=180, color=(8, 9, 12)):
+    o = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    o.fill((*color, alpha))
+    surf.blit(o, (0, 0))
 
 
-def draw_text_screen(surface, lines, font_size=22, title_size=32, alpha=255):
-    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-    overlay.fill((0,0,0,210))
-    overlay.set_alpha(alpha)
-    surface.blit(overlay, (0,0))
+def draw_text_screen(surf, lines, title=None, footer="E / ENTER — continue", t=1.0):
+    overlay(surf, 215)
+    y = 130
+    if title:
+        text(surf, title, WIDTH // 2, 80, F_BIG, C_ACCENT2, center=True)
+    shown = int(len(lines) * min(1.0, t))
+    for i, line in enumerate(lines[:shown]):
+        text(surf, line, WIDTH // 2, y + i * 26, F_MED, C_TEXT, center=True)
+    if footer and t >= 0.99:
+        text(surf, footer, WIDTH // 2, HEIGHT - 60, F_SMALL, C_TEXT_DIM, center=True)
 
-    # Decorative top/bottom borders
-    border_s = pygame.Surface((WIDTH, 4), pygame.SRCALPHA)
-    border_s.fill((212,175,55,int(alpha*0.6)))
-    surface.blit(border_s, (0, 60))
-    surface.blit(border_s, (0, HEIGHT-64))
 
-    total_h = 0
+def draw_dialogue(surf, name, lines, page_done):
+    h = 170
+    pygame.draw.rect(surf, (12, 13, 17), (80, HEIGHT - h - 30, WIDTH - 160, h), border_radius=8)
+    pygame.draw.rect(surf, (60, 70, 86), (80, HEIGHT - h - 30, WIDTH - 160, h), 2, border_radius=8)
+    text(surf, name, 104, HEIGHT - h - 18, F_MED, C_ACCENT2)
     for i, line in enumerate(lines):
-        sz = title_size if i==0 and line else font_size
-        total_h += sz + 8
-    start_y = max(80, HEIGHT//2 - total_h//2)
-    cy = start_y
+        text(surf, line, 104, HEIGHT - h + 12 + i * 24, F_MED, C_TEXT)
+    if page_done:
+        text(surf, "E — continue", WIDTH - 240, HEIGHT - 56, F_SMALL, C_TEXT_DIM)
 
+
+def draw_beacon_menu(surf, player, sel, message):
+    overlay(surf, 170)
+    text(surf, "RELAY BEACON", WIDTH // 2, 110, F_BIG, C_GRACE, center=True)
+    text(surf, message, WIDTH // 2, 152, F_SMALL, C_TEXT_DIM, center=True)
+    cost = level_cost(player.level)
+    rows = [
+        (f"VIGOR      {player.vigor:>3}   (+{VIGOR_HP} max HP)", True),
+        (f"ENDURANCE  {player.endurance:>3}   (+{ENDURANCE_STAM} max stamina)", True),
+        (f"STRENGTH   {player.strength:>3}   (+{int(STRENGTH_DMG*100)}% damage)", True),
+        ("LEAVE", True),
+    ]
+    y0 = 240
+    text(surf, f"Shards: {player.shards}    Next level: {cost}", WIDTH // 2, 200,
+         F_MED, C_SHARD, center=True)
+    for i, (label, _) in enumerate(rows):
+        col = C_ACCENT if i == sel else C_TEXT
+        if i < 3 and player.shards < cost:
+            col = C_TEXT_DIM if i != sel else (140, 170, 190)
+        text(surf, ("> " if i == sel else "  ") + label, WIDTH // 2 - 220, y0 + i * 44, F_MED, col)
+    text(surf, "W/S — select   E/ENTER — confirm", WIDTH // 2, HEIGHT - 80,
+         F_SMALL, C_TEXT_DIM, center=True)
+
+
+MINIMAP_COLORS = {
+    'asphalt': (50, 51, 56), 'road': (38, 39, 44), 'sidewalk': (88, 86, 84),
+    'plaza': (84, 80, 88), 'grass': (52, 70, 44), 'dirt': (76, 64, 50),
+    'water': (28, 44, 60), 'sand': (110, 98, 78), 'alley': (44, 44, 48),
+    'lot': (56, 54, 52),
+}
+
+_minimap_base = None
+MAP_SCALE = 2
+
+
+def build_minimap(world):
+    global _minimap_base
+    scale = MAP_SCALE
+    surf = pygame.Surface((world.w * scale, world.h * scale))
+    for y in range(world.h):
+        for x in range(world.w):
+            c = MINIMAP_COLORS.get(world.ground[y][x], (60, 60, 60))
+            if world.solid[y][x] and world.ground[y][x] != 'water':
+                c = (max(0, c[0] - 18), max(0, c[1] - 18), max(0, c[2] - 18))
+            surf.fill(c, (x * scale, y * scale, scale, scale))
+    for b in world.buildings:
+        col = (96, 98, 108) if b.style != 'tower' else (120, 200, 240)
+        surf.fill(col, (b.x * scale, b.y * scale, b.fw * scale, b.fh * scale))
+    _minimap_base = surf
+    return surf
+
+
+def draw_map(surf, world, player, bosses_defeated):
+    overlay(surf, 200)
+    base = _minimap_base if _minimap_base is not None else build_minimap(world)
+    scale = MAP_SCALE
+    mw, mh = base.get_size()
+    mx, my = (WIDTH - mw) // 2, (HEIGHT - mh) // 2
+    surf.blit(base, (mx, my))
+    pygame.draw.rect(surf, (80, 90, 104), (mx, my, mw, mh), 2)
+    for bx, by, name in world.beacons:
+        pygame.draw.circle(surf, C_GRACE, (mx + int(bx * scale), my + int(by * scale)), 4)
+    for key, b in world.bosses.items():
+        if key not in bosses_defeated:
+            cx, cy = b['center']
+            pygame.draw.circle(surf, C_DANGER, (mx + int(cx * scale), my + int(cy * scale)), 4)
+    px, py = mx + int(player.x * scale), my + int(player.y * scale)
+    pygame.draw.circle(surf, (255, 255, 255), (px, py), 5, 2)
+    pygame.draw.circle(surf, C_ACCENT, (px, py), 2)
+    text(surf, "MERIDIAN CITY — M to close", WIDTH // 2, my - 24, F_MED, C_TEXT, center=True)
+    text(surf, "blue: beacons   red: something old and angry   white: you",
+         WIDTH // 2, my + mh + 20, F_SMALL, C_TEXT_DIM, center=True)
+
+
+def draw_death(surf, msg, t):
+    overlay(surf, min(220, int(t * 300)))
+    img = F_TITLE.render(msg, True, (170, 30, 36))
+    img.set_alpha(min(255, int(t * 300)))
+    surf.blit(img, img.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 30)))
+    if t > 1.2:
+        text(surf, "the beacon prints you again — E / ENTER", WIDTH // 2, HEIGHT // 2 + 40,
+             F_SMALL, C_TEXT_DIM, center=True)
+
+
+def draw_title(surf, t):
+    surf.fill((10, 11, 15))
+    # skyline silhouette
+    import random as _r
+    rng = _r.Random(7)
+    for i in range(40):
+        bw = rng.randint(30, 80)
+        bh = rng.randint(60, 280)
+        x = i * 34 - 40
+        pygame.draw.rect(surf, (16, 18, 24), (x, HEIGHT - bh - 120, bw, bh + 200))
+        for _ in range(bh // 40):
+            wx = x + rng.randint(4, bw - 8)
+            wy = HEIGHT - bh - 110 + rng.randint(0, bh - 10)
+            if rng.random() < 0.5:
+                pygame.draw.rect(surf, (150, 130, 70), (wx, wy, 3, 5))
+    pulse = 0.5 + 0.5 * math.sin(t * 2)
+    text(surf, "S T I L L W A K E", WIDTH // 2, 240, F_TITLE, C_ACCENT, center=True)
+    text(surf, "a tale of the Stillness — Meridian City, three years in",
+         WIDTH // 2, 300, F_MED, C_TEXT_DIM, center=True)
+    col = (int(120 + 100 * pulse),) * 3
+    text(surf, "PRESS ENTER", WIDTH // 2, 480, F_MED, col, center=True)
+    text(surf, "a 2.5D isometric souls-like — WASD move / J K attack / SPACE roll", WIDTH // 2, HEIGHT - 50, F_SMALL,
+         (70, 74, 84), center=True)
+
+
+def draw_ending_choice(surf, lines, sel):
+    overlay(surf, 225)
+    y = 110
     for i, line in enumerate(lines):
-        if not line:
-            cy += font_size//2
-            continue
-        if i == 0:
-            font = get_font(title_size)
-            col = GOLD
-        elif line.startswith('—') or line.startswith('['):
-            font = get_font(font_size)
-            col = (180,170,130)
-        elif line.startswith('RESTORE') or line.startswith('BURN'):
-            font = get_font(font_size)
-            col = (200,220,255) if line.startswith('RESTORE') else (255,140,60)
-        else:
-            font = get_font(font_size, bold=False)
-            col = (180,175,165)
-        txt = font.render(line, True, col)
-        x = WIDTH//2 - txt.get_width()//2
-        # Shadow
-        shadow_s = font.render(line, True, (0,0,0))
-        surface.blit(shadow_s, (x+2, cy+2))
-        surface.blit(txt, (x, cy))
-        cy += font.get_height() + 6
+        text(surf, line, WIDTH // 2, y + i * 26, F_MED, C_TEXT, center=True)
+    opts = ["SEVER THE LATTICE — wake the city", "INHERIT THE LATTICE — keep the dream"]
+    for i, o in enumerate(opts):
+        col = C_ACCENT if sel == i else C_TEXT_DIM
+        text(surf, ("> " if sel == i else "  ") + o, WIDTH // 2, 480 + i * 40, F_MED, col, center=True)
+    text(surf, "W/S — choose    E/ENTER — decide", WIDTH // 2, HEIGHT - 60,
+         F_SMALL, C_TEXT_DIM, center=True)
 
 
-def draw_parry_success(surface, x, y, cam_ox, cam_oy):
-    sx = int(x - cam_ox)
-    sy = int(y - cam_oy)
-    font = get_font(22)
-    txt = font.render("PARRY!", True, (255,240,60))
-    draw_glow(surface, sx, sy-40, 30, (255,230,50), 100)
-    shadow = font.render("PARRY!", True, (100,80,0))
-    surface.blit(shadow, (sx - txt.get_width()//2+2, sy-44))
-    surface.blit(txt, (sx - txt.get_width()//2, sy-46))
-
-
-def draw_pickup_text(surface, text, timer, max_timer=180):
-    fade = min(1.0, timer/30) * min(1.0, (timer)/max_timer*6)
-    alpha = int(255 * fade)
-    font = get_font(18)
-    txt = font.render(text, True, GOLD)
-    panel = pygame.Surface((txt.get_width()+24, txt.get_height()+12), pygame.SRCALPHA)
-    pygame.draw.rect(panel, (0,0,0,160), (0,0,panel.get_width(),panel.get_height()), border_radius=4)
-    pygame.draw.rect(panel, (212,175,55,100), (0,0,panel.get_width(),panel.get_height()), border_radius=4, width=1)
-    panel.blit(txt, (12,6))
-    panel.set_alpha(alpha)
-    surface.blit(panel, (WIDTH//2 - panel.get_width()//2, HEIGHT//2 + 65))
+def draw_lock_marker(surf, sx, sy, t):
+    r = 14 + math.sin(t * 6) * 2
+    pygame.draw.circle(surf, C_ACCENT2, (int(sx), int(sy)), int(r), 2)
+    pygame.draw.line(surf, C_ACCENT2, (sx - r - 5, sy), (sx - r + 3, sy), 2)
+    pygame.draw.line(surf, C_ACCENT2, (sx + r - 3, sy), (sx + r + 5, sy), 2)

@@ -8,3 +8,8 @@ dist/
 build/
 .env
 .venv/
+
+# test artifacts
+ss_*.png
+crop_*.png
+closeup_*.png

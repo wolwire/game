@@ -1,372 +1,339 @@
-import pygame
+"""Calle Wren — souls-like state machine with a real weapon system:
+per-weapon combo chains, queued inputs, dodge i-frames, parry, stims."""
 import math
-import random
-from .constants import *
-from .particles import draw_glow
+from src.constants import *
+from src.entity import move_with_collision, dist, norm
+from src.iso import screen_dir_to_world
+from src.weapons import WEAPONS, step_time
 
 
 class Player:
     def __init__(self, x, y):
-        self.pos = pygame.math.Vector2(x, y)
-        self.rect = pygame.Rect(x - 16, y - 16, 32, 32)
-
-        self.max_hp = 120
-        self.hp = self.max_hp
-        self.max_stamina = 100
-        self.stamina = self.max_stamina
-        self.stamina_regen = 0.6
-        self.stamina_regen_delay = 0
-        self.speed = 3.2
-        self.runes = 0
+        self.x, self.y = x, y
+        self.radius = 0.55
+        # stats
         self.level = 1
-
-        self.max_flasks = 4
-        self.flasks = self.max_flasks
-
-        self.facing = pygame.math.Vector2(1, 0)
-
-        self.attack_timer = 0
-        self.attack_cooldown = 0
-        self.attack_hitbox = None
-        self.attack_type = None
-        self.light_dmg = 22
-        self.heavy_dmg = 48
-        self.hit_enemies = set()
-
-        self.rolling = False
-        self.roll_timer = 0
-        self.roll_dir = pygame.math.Vector2(0, 0)
-        self.roll_vel = pygame.math.Vector2(0, 0)
-        self.iframes = 0
-
-        self.parrying = False
-        self.parry_timer = 0
-        self.parry_cooldown = 0
-
-        self.blocking = False
-
-        self.hurt_timer = 0
-        self.dead = False
-        self.death_timer = 0
-
-        self.lost_runes = 0
-        self.lost_rune_pos = None
-
-        self.anim_timer = 0
-        self.walk_frame = 0
-        self.bob = 0.0
-
-        self.poise = 40
-        self.max_poise = 40
-        self.poise_damage = 0
-        self.stagger_timer = 0
-
-        # Sword trail
+        self.vigor = 5
+        self.endurance = 5
+        self.strength = 5
+        self.shards = 0
+        self.bonus_hp = 0
+        self.stim_max = STIM_CHARGES
+        self.hp = self.max_hp
+        self.stamina = self.max_stamina
+        self.stims = self.stim_max
+        # gear
+        self.inventory = ['wrench']
+        self.weapon_idx = 0
+        # state
+        self.state = 'idle'        # idle walk run roll attack parry stim dead
+        self.timer = 0.0
+        self.fx, self.fy = 1.0, 0.0
+        self.move_dx, self.move_dy = 0.0, 0.0
+        self.roll_dx, self.roll_dy = 0.0, 0.0
+        self.iframes = 0.0
+        self.hit_iframes = 0.0
+        self.stam_delay = 0.0
+        # attack bookkeeping
+        self.atk_heavy = False
+        self.atk_step = 0
+        self.atk_elapsed = 0.0
+        self.atk_hit_done = False
+        self.atk_queued = False
         self.trail = []
+        self.parry_active = 0.0
+        self.parry_success_t = 0.0
+        self.lock_target = None
+        self.anim_t = 0.0
+        self.sprinting = False
+        self.walking = False
+        self.kills = 0
+        self.deaths = 0
+        self.state_t = 0.0
 
-    def get_stamina_cost(self, action):
-        return {'light': 18, 'heavy': 35, 'roll': 28, 'parry': 20, 'block': 6}.get(action, 0)
+    # ---- derived ----
+    @property
+    def max_hp(self):
+        return PLAYER_BASE_HP + self.vigor * VIGOR_HP + self.bonus_hp
 
-    def use_stamina(self, amount):
-        self.stamina = max(0, self.stamina - amount)
-        self.stamina_regen_delay = 60
+    @property
+    def max_stamina(self):
+        return PLAYER_BASE_STAMINA + self.endurance * ENDURANCE_STAM
 
-    def can_act(self):
-        return (not self.rolling and self.attack_timer <= 0 and
-                self.stagger_timer <= 0 and not self.dead and
-                self.hurt_timer <= 10)
+    @property
+    def dmg_mult(self):
+        return 1.0 + self.strength * STRENGTH_DMG
 
-    def light_attack(self):
-        if self.attack_cooldown > 0 or not self.can_act(): return False
-        if self.stamina < self.get_stamina_cost('light'): return False
-        self.attack_type = 'light'
-        self.attack_timer = 16
-        self.attack_cooldown = 28
-        self.hit_enemies = set()
-        self.use_stamina(self.get_stamina_cost('light'))
-        self.trail = []
-        return True
+    @property
+    def weapon(self):
+        return WEAPONS[self.inventory[self.weapon_idx]]
 
-    def heavy_attack(self):
-        if self.attack_cooldown > 0 or not self.can_act(): return False
-        if self.stamina < self.get_stamina_cost('heavy'): return False
-        self.attack_type = 'heavy'
-        self.attack_timer = 24
-        self.attack_cooldown = 45
-        self.hit_enemies = set()
-        self.use_stamina(self.get_stamina_cost('heavy'))
-        self.trail = []
-        return True
+    @property
+    def alive(self):
+        return self.state != 'dead'
 
-    def roll(self, move_dir):
-        if not self.can_act(): return False
-        if self.stamina < self.get_stamina_cost('roll'): return False
-        self.rolling = True
-        self.roll_timer = ROLL_DURATION
-        self.roll_dir = move_dir.normalize() if move_dir.length() > 0 else self.facing.copy()
-        self.iframes = IFRAMES_ON_ROLL
-        self.use_stamina(self.get_stamina_cost('roll'))
-        return True
+    def busy(self):
+        return self.state in ('roll', 'attack', 'parry', 'stim')
 
-    def parry(self):
-        if self.parry_cooldown > 0 or not self.can_act(): return False
-        if self.stamina < self.get_stamina_cost('parry'): return False
-        self.parrying = True
-        self.parry_timer = PARRY_WINDOW + 8
-        self.parry_cooldown = PARRY_COOLDOWN
-        self.use_stamina(self.get_stamina_cost('parry'))
-        return True
+    def give_weapon(self, key):
+        if key not in self.inventory:
+            self.inventory.append(key)
+            self.weapon_idx = len(self.inventory) - 1
+            return True
+        return False
 
-    def use_flask(self):
-        if self.flasks <= 0 or self.hp >= self.max_hp or not self.can_act(): return False
-        self.flasks -= 1
-        self.hp = min(self.max_hp, self.hp + 60)
-        return True
+    def cycle_weapon(self, d=1):
+        if not self.busy():
+            self.weapon_idx = (self.weapon_idx + d) % len(self.inventory)
 
-    def take_damage(self, amount, knockback_dir=None):
-        if self.iframes > 0 or self.dead: return False
-        if self.blocking:
-            amount = int(amount * 0.3)
-            self.use_stamina(amount * 0.5)
-        self.hp -= amount
-        self.hurt_timer = 20
-        self.poise_damage += amount
-        if self.poise_damage >= self.poise:
-            self.stagger_timer = STAGGER_DURATION
-            self.poise_damage = 0
+    # ---- current attack step info ----
+    def _step_def(self):
+        w = self.weapon
+        if self.atk_heavy:
+            k, wu, act, rec, mult = w['heavy']
+            return (k, wu, act, rec)
+        return w['combo'][self.atk_step]
+
+    def attack_progress(self):
+        return min(1.0, self.atk_elapsed / max(0.01, step_time(self._step_def())))
+
+    def attack_kind(self):
+        return self._step_def()[0]
+
+    # ---- inputs ----
+    def try_roll(self):
+        if self.busy() or self.stamina < ROLL_COST or not self.alive:
+            return
+        dx, dy = self.move_dx, self.move_dy
+        if abs(dx) < 0.01 and abs(dy) < 0.01:
+            dx, dy = self.fx, self.fy
+        self.roll_dx, self.roll_dy = norm(dx, dy)
+        self.state = 'roll'
+        self.state_t = 0.0
+        self.timer = ROLL_TIME
+        self.iframes = ROLL_IFRAMES
+        self._spend(ROLL_COST)
+
+    def try_attack(self, heavy=False):
+        if not self.alive:
+            return
+        w = self.weapon
+        # chain: queue the next light during recover
+        if self.state == 'attack' and not heavy and not self.atk_heavy:
+            k, wu, act, rec = self._step_def()
+            if self.atk_elapsed > wu + act and self.atk_step + 1 < len(w['combo']):
+                self.atk_queued = True
+            return
+        if self.busy():
+            return
+        cost = w['stamina'] * (2.0 if heavy else 1.0)
+        if self.stamina < cost:
+            return
+        self._face_target()
+        self.state = 'attack'
+        self.state_t = 0.0
+        self.atk_heavy = heavy
+        self.atk_step = 0
+        self.atk_elapsed = 0.0
+        self.atk_hit_done = False
+        self.atk_queued = False
+        self.trail.clear()
+        self._spend(cost)
+
+    def _face_target(self):
+        if self.lock_target is not None and getattr(self.lock_target, 'alive', False):
+            self.fx, self.fy = norm(self.lock_target.x - self.x, self.lock_target.y - self.y)
+        elif abs(self.move_dx) > 0.01 or abs(self.move_dy) > 0.01:
+            self.fx, self.fy = self.move_dx, self.move_dy
+
+    def try_parry(self):
+        if self.busy() or not self.alive or self.stamina < 10:
+            return
+        self.state = 'parry'
+        self.state_t = 0.0
+        self.timer = PARRY_WINDOW + PARRY_RECOVER
+        self.parry_active = PARRY_WINDOW
+        self._spend(10)
+
+    def try_stim(self):
+        if self.busy() or not self.alive or self.stims <= 0 or self.hp >= self.max_hp:
+            return
+        self.state = 'stim'
+        self.state_t = 0.0
+        self.timer = STIM_TIME
+
+    def _spend(self, amt):
+        self.stamina = max(0, self.stamina - amt)
+        self.stam_delay = STAMINA_REGEN_DELAY
+
+    # ---- per-frame ----
+    def update(self, dt, world, move_screen, sprinting):
+        self.anim_t += dt
+        self.state_t += dt
+        self.iframes = max(0, self.iframes - dt)
+        self.hit_iframes = max(0, self.hit_iframes - dt)
+        self.parry_active = max(0, self.parry_active - dt)
+        self.parry_success_t = max(0, self.parry_success_t - dt)
+        for t in self.trail:
+            t[2] -= dt
+        self.trail[:] = [t for t in self.trail if t[2] > 0]
+        if not self.alive:
+            return
+
+        mdx, mdy = screen_dir_to_world(*move_screen) if any(move_screen) else (0.0, 0.0)
+        self.move_dx, self.move_dy = mdx, mdy
+        self.walking = False
+        self.sprinting = False
+
+        if self.state in ('idle', 'walk', 'run'):
+            speed = PLAYER_SPEED
+            if sprinting and (mdx or mdy) and self.stamina > 1:
+                speed *= PLAYER_SPRINT_MULT
+                self.sprinting = True
+                self.stamina = max(0, self.stamina - SPRINT_DRAIN * dt)
+                self.stam_delay = max(self.stam_delay, 0.2)
+            if mdx or mdy:
+                self.x, self.y = move_with_collision(world, self.x, self.y,
+                                                     mdx * speed * dt, mdy * speed * dt, self.radius)
+                if self.lock_target is None:
+                    self.fx, self.fy = mdx, mdy
+                self.walking = True
+            self.state = ('run' if self.sprinting else 'walk') if self.walking else 'idle'
+        elif self.state == 'roll':
+            self.timer -= dt
+            sp = ROLL_SPEED * (0.5 + 0.5 * (self.timer / ROLL_TIME))
+            self.x, self.y = move_with_collision(world, self.x, self.y,
+                                                 self.roll_dx * sp * dt, self.roll_dy * sp * dt, self.radius)
+            if self.timer <= 0:
+                self.state = 'idle'
+        elif self.state == 'attack':
+            self.atk_elapsed += dt
+            k, wu, act, rec = self._step_def()
+            # small forward drift during the strike
+            if wu < self.atk_elapsed < wu + act:
+                self.x, self.y = move_with_collision(world, self.x, self.y,
+                                                     self.fx * 2.2 * dt, self.fy * 2.2 * dt, self.radius)
+            if self.atk_elapsed >= wu + act + rec:
+                if self.atk_queued and not self.atk_heavy and self.atk_step + 1 < len(self.weapon['combo']):
+                    cost = self.weapon['stamina'] * 0.8
+                    if self.stamina >= cost:
+                        self.atk_step += 1
+                        self.atk_elapsed = 0.0
+                        self.atk_hit_done = False
+                        self.atk_queued = False
+                        self._face_target()
+                        self._spend(cost)
+                    else:
+                        self.state = 'idle'
+                else:
+                    self.state = 'idle'
+        elif self.state in ('parry', 'stim'):
+            self.timer -= dt
+            if self.state == 'stim' and self.timer <= 0:
+                self.stims -= 1
+                self.hp = min(self.max_hp, self.hp + STIM_HEAL)
+            if self.timer <= 0:
+                self.state = 'idle'
+
+        if self.lock_target is not None:
+            t = self.lock_target
+            if not getattr(t, 'alive', False) or dist(self.x, self.y, t.x, t.y) > 26:
+                self.lock_target = None
+            elif self.state in ('idle', 'walk', 'run'):
+                self.fx, self.fy = norm(t.x - self.x, t.y - self.y)
+
+        self.stam_delay = max(0, self.stam_delay - dt)
+        if self.stam_delay <= 0 and self.state != 'roll':
+            self.stamina = min(self.max_stamina, self.stamina + STAMINA_REGEN * dt)
+
+    # ---- combat ----
+    def attack_active(self):
+        if self.state != 'attack' or self.atk_hit_done:
+            return False
+        k, wu, act, rec = self._step_def()
+        return wu <= self.atk_elapsed <= wu + act
+
+    def attack_damage(self):
+        w = self.weapon
+        base = w['dmg']
+        if self.atk_heavy:
+            base *= w['heavy'][4]
+        return base * self.dmg_mult
+
+    def in_arc(self, ex, ey, extra=0.0):
+        w = self.weapon
+        d = dist(self.x, self.y, ex, ey)
+        if d > w['reach'] + extra:
+            return False
+        if d < 0.8:
+            return True
+        ang = math.atan2(ey - self.y, ex - self.x)
+        fang = math.atan2(self.fy, self.fx)
+        diff = (ang - fang + math.pi) % (2 * math.pi) - math.pi
+        return abs(diff) < w['arc'] / 2
+
+    def take_damage(self, dmg, sx=0.0, sy=0.0):
+        if not self.alive:
+            return 'dead'
+        if self.parry_active > 0:
+            self.parry_success_t = 0.9
+            self.parry_active = 0
+            self.state = 'idle'
+            self.stamina = min(self.max_stamina, self.stamina + 25)
+            return 'parried'
+        if self.iframes > 0 or self.hit_iframes > 0:
+            return 'dodged'
+        self.hp -= dmg
+        self.hit_iframes = INVULN_AFTER_HIT
         if self.hp <= 0:
             self.hp = 0
-            self.dead = True
-            self.lost_runes = self.runes
-            self.lost_rune_pos = (self.pos.x, self.pos.y)
-            self.runes = 0
-        return True
+            self.state = 'dead'
+            self.state_t = 0.0
+            self.deaths += 1
+            return 'dead'
+        return 'hit'
 
-    def get_attack_hitbox(self):
-        if self.attack_timer <= 0: return None
-        active_start = 6 if self.attack_type == 'light' else 12
-        active_end = active_start + (8 if self.attack_type == 'light' else 12)
-        elapsed = (16 if self.attack_type == 'light' else 24) - self.attack_timer
-        if active_start <= elapsed <= active_end:
-            reach = 48 if self.attack_type == 'light' else 60
-            cx = self.pos.x + self.facing.x * reach
-            cy = self.pos.y + self.facing.y * reach
-            size = 44 if self.attack_type == 'light' else 56
-            return pygame.Rect(cx - size//2, cy - size//2, size, size)
+    def rest(self):
+        self.hp = self.max_hp
+        self.stamina = self.max_stamina
+        self.stims = self.stim_max
+
+    def respawn(self, x, y):
+        self.x, self.y = x, y
+        self.state = 'idle'
+        self.lock_target = None
+        self.trail.clear()
+        self.rest()
+
+    # ---- presentation ----
+    def anim(self):
+        if self.state == 'attack':
+            return 'attack'
+        if self.state == 'run':
+            return 'run'
+        if self.state == 'walk':
+            return 'walk'
+        if self.state == 'roll':
+            return 'roll'
+        if self.state == 'parry':
+            return 'parry'
+        if self.state == 'stim':
+            return 'drink'
+        if self.state == 'dead':
+            return 'dead'
+        return 'idle'
+
+    def anim_time(self):
+        if self.state in ('roll', 'parry', 'stim', 'dead'):
+            if self.state == 'roll':
+                return 1.0 - self.timer / ROLL_TIME
+            if self.state == 'dead':
+                return self.state_t
+            total = (PARRY_WINDOW + PARRY_RECOVER) if self.state == 'parry' else STIM_TIME
+            return 1.0 - self.timer / total
+        return self.anim_t
+
+    def attack_info(self):
+        if self.state == 'attack':
+            return (self.attack_kind(), self.attack_progress(), self.atk_step)
         return None
-
-    def get_parry_active(self):
-        elapsed = (PARRY_WINDOW + 8) - self.parry_timer
-        return self.parrying and 2 <= elapsed <= PARRY_WINDOW
-
-    def update(self, keys, walls, dt=1.0):
-        if self.dead: return
-        if self.stagger_timer > 0:
-            self.stagger_timer -= 1
-            return
-
-        def k(key):
-            try: return bool(keys[key])
-            except (KeyError, IndexError): return False
-
-        move = pygame.math.Vector2(0, 0)
-        if k(pygame.K_w) or k(pygame.K_UP):    move.y -= 1
-        if k(pygame.K_s) or k(pygame.K_DOWN):  move.y += 1
-        if k(pygame.K_a) or k(pygame.K_LEFT):  move.x -= 1
-        if k(pygame.K_d) or k(pygame.K_RIGHT): move.x += 1
-
-        self.blocking = (k(pygame.K_LSHIFT) and not self.rolling and
-                         self.attack_timer <= 0 and self.stamina > 0)
-
-        if self.attack_timer > 0: self.attack_timer -= 1
-        if self.attack_cooldown > 0: self.attack_cooldown -= 1
-        if self.parry_timer > 0: self.parry_timer -= 1
-        else: self.parrying = False
-        if self.parry_cooldown > 0: self.parry_cooldown -= 1
-        if self.hurt_timer > 0: self.hurt_timer -= 1
-        if self.iframes > 0: self.iframes -= 1
-
-        if self.stamina_regen_delay > 0:
-            self.stamina_regen_delay -= 1
-        elif self.stamina < self.max_stamina:
-            self.stamina = min(self.max_stamina, self.stamina + self.stamina_regen)
-
-        if self.rolling:
-            self.roll_timer -= 1
-            progress = self.roll_timer / ROLL_DURATION
-            speed = 7 * progress + 1
-            self._move(self.roll_dir * speed, walls)
-            if self.roll_timer <= 0:
-                self.rolling = False
-            return
-
-        if move.length() > 0 and not self.blocking:
-            move = move.normalize()
-            self.facing = move.copy()
-            spd = self.speed * (0.6 if self.attack_timer > 0 else 1.0)
-            self._move(move * spd, walls)
-            self.anim_timer += 1
-            self.bob = math.sin(self.anim_timer * 0.4) * 2.5
-            if self.anim_timer % 8 == 0:
-                self.walk_frame = (self.walk_frame + 1) % 4
-        else:
-            self.bob *= 0.7
-
-        # Sword trail
-        if self.attack_timer > 0:
-            reach = 48 if self.attack_type == 'light' else 64
-            tip = (self.pos.x + self.facing.x * reach,
-                   self.pos.y + self.facing.y * reach)
-            self.trail.append(tip)
-            if len(self.trail) > 10:
-                self.trail.pop(0)
-        else:
-            if self.trail:
-                self.trail.pop(0)
-
-    def _move(self, delta, walls):
-        self.pos.x += delta.x
-        self.rect.centerx = int(self.pos.x)
-        for w in walls:
-            if self.rect.colliderect(w):
-                if delta.x > 0: self.rect.right = w.left
-                else: self.rect.left = w.right
-                self.pos.x = self.rect.centerx
-        self.pos.y += delta.y
-        self.rect.centery = int(self.pos.y)
-        for w in walls:
-            if self.rect.colliderect(w):
-                if delta.y > 0: self.rect.bottom = w.top
-                else: self.rect.top = w.bottom
-            self.pos.y = self.rect.centery
-
-    def draw(self, surface, cam_ox, cam_oy):
-        sx = int(self.pos.x - cam_ox)
-        sy = int(self.pos.y - cam_oy + self.bob)
-
-        # Shadow
-        shadow = pygame.Surface((36, 14), pygame.SRCALPHA)
-        pygame.draw.ellipse(shadow, (0, 0, 0, 90), (0, 0, 36, 14))
-        surface.blit(shadow, (sx - 18, sy + 12))
-
-        # I-frame aura
-        if self.iframes > 0:
-            draw_glow(surface, sx, sy, 28, (80, 180, 255),
-                      int(120 * self.iframes / IFRAMES_ON_ROLL))
-
-        # Sword trail
-        if len(self.trail) >= 2:
-            for i in range(1, len(self.trail)):
-                alpha = int(180 * i / len(self.trail))
-                p1 = (int(self.trail[i-1][0] - cam_ox), int(self.trail[i-1][1] - cam_oy))
-                p2 = (int(self.trail[i][0] - cam_ox), int(self.trail[i][1] - cam_oy))
-                tc = (220, 200, 255) if self.attack_type == 'light' else (255, 160, 40)
-                ts = pygame.Surface((abs(p2[0]-p1[0])+12, abs(p2[1]-p1[1])+12), pygame.SRCALPHA)
-                ox2 = min(p1[0],p2[0])-6
-                oy2 = min(p1[1],p2[1])-6
-                pygame.draw.line(ts, (*tc, alpha),
-                                 (p1[0]-ox2, p1[1]-oy2), (p2[0]-ox2, p2[1]-oy2), 4)
-                surface.blit(ts, (ox2, oy2))
-
-        if self.dead:
-            # Fallen figure
-            pygame.draw.ellipse(surface, (60, 50, 45), (sx-18, sy-6, 36, 18))
-            pygame.draw.ellipse(surface, (80, 65, 55), (sx-16, sy-4, 32, 14))
-            return
-
-        # Cloak base (dark outer)
-        cloak_color = (35, 30, 25)
-        if self.hurt_timer > 0:
-            cloak_color = (120, 30, 30)
-        pygame.draw.rect(surface, cloak_color, (sx-15, sy-14, 30, 30), border_radius=5)
-
-        # Armor inner
-        if self.rolling:
-            armor = (80, 160, 210)
-        elif self.blocking:
-            armor = (120, 120, 160)
-        elif self.parrying:
-            armor = (240, 220, 60)
-            draw_glow(surface, sx, sy, 24, (255, 240, 80), 100)
-        elif self.attack_timer > 0:
-            t = self.attack_timer / (16 if self.attack_type == 'light' else 24)
-            armor = (int(180 + 60*t), int(160 + 40*t), int(80 + 20*t))
-        else:
-            armor = (130, 118, 95)
-
-        pygame.draw.rect(surface, armor, (sx-13, sy-12, 26, 26), border_radius=4)
-
-        # Chest plate highlight
-        pygame.draw.rect(surface, tuple(min(255,c+40) for c in armor),
-                         (sx-8, sy-10, 16, 10), border_radius=2)
-
-        # Belt
-        pygame.draw.rect(surface, (60, 50, 35), (sx-13, sy+2, 26, 5))
-        pygame.draw.rect(surface, (90, 75, 45), (sx-2, sy+3, 4, 3))
-
-        # Hood/helm
-        hood = (55, 48, 38)
-        pygame.draw.circle(surface, hood, (sx, sy-14), 13)
-        pygame.draw.circle(surface, (80, 68, 52), (sx, sy-15), 11)
-
-        # Visor slit
-        vx = sx + int(self.facing.x * 5)
-        vy = sy - 15 + int(self.facing.y * 3)
-
-        # Eyes glow
-        eye_color = (255, 200, 60)
-        if self.parrying:
-            eye_color = (255, 255, 100)
-            draw_glow(surface, vx-3, vy, 8, eye_color, 160)
-            draw_glow(surface, vx+3, vy, 8, eye_color, 160)
-        elif self.attack_timer > 0:
-            eye_color = (255, 140, 40)
-        elif self.hurt_timer > 0:
-            eye_color = (255, 80, 80)
-
-        pygame.draw.circle(surface, eye_color, (vx-3, vy), 2)
-        pygame.draw.circle(surface, eye_color, (vx+3, vy), 2)
-        draw_glow(surface, vx-3, vy, 6, eye_color, 80)
-        draw_glow(surface, vx+3, vy, 6, eye_color, 80)
-
-        # Pauldrons (shoulder guards)
-        pygame.draw.ellipse(surface, (100, 90, 70), (sx-16, sy-12, 10, 8))
-        pygame.draw.ellipse(surface, (100, 90, 70), (sx+6, sy-12, 10, 8))
-
-        # Sword
-        if self.attack_timer > 0:
-            progress = self.attack_timer / (16 if self.attack_type == 'light' else 24)
-            swing = math.sin(progress * math.pi)
-            ang = math.atan2(self.facing.y, self.facing.x)
-            arc = math.pi * 0.7 if self.attack_type == 'light' else math.pi
-            a = ang - arc * 0.5 + arc * (1 - progress)
-            blade_len = 40 if self.attack_type == 'light' else 52
-            wx = int(sx + math.cos(a) * blade_len)
-            wy = int(sy + math.sin(a) * blade_len)
-            blade_color = (200, 215, 240) if self.attack_type == 'light' else (240, 160, 40)
-            # Blade glow
-            draw_glow(surface, (sx+wx)//2, (sy+wy)//2, 14, blade_color, int(100*swing))
-            pygame.draw.line(surface, (80, 80, 100), (sx, sy), (wx, wy), 5)
-            pygame.draw.line(surface, blade_color, (sx, sy), (wx, wy), 3)
-            pygame.draw.circle(surface, (255, 240, 200), (wx, wy), 4)
-        else:
-            # Resting sword on back
-            bx = sx - int(self.facing.y * 8)
-            by = sy + int(self.facing.x * 8)
-            ex2 = bx + int(self.facing.y * 22)
-            ey2 = by - int(self.facing.x * 22)
-            pygame.draw.line(surface, (80, 80, 95), (bx, by), (ex2, ey2), 3)
-            pygame.draw.line(surface, (160, 170, 190), (bx, by), (ex2, ey2), 2)
-
-        # Shield (blocking/parrying)
-        if self.blocking or self.parrying:
-            sx2 = sx - int(self.facing.x * 18) + int(self.facing.y * 16)
-            sy2b = sy - int(self.facing.y * 18) - int(self.facing.x * 16)
-            sc_outer = (60, 60, 90)
-            sc_inner = (140, 150, 200) if self.parrying else (100, 110, 150)
-            pygame.draw.circle(surface, sc_outer, (sx2, sy2b), 13)
-            pygame.draw.circle(surface, sc_inner, (sx2, sy2b), 11)
-            pygame.draw.circle(surface, (200, 210, 255), (sx2, sy2b), 11, 2)
-            pygame.draw.circle(surface, (220, 230, 255), (sx2-2, sy2b-2), 4)
-            if self.parrying:
-                draw_glow(surface, sx2, sy2b, 20, (255, 240, 80), 150)
